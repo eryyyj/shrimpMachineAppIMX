@@ -1,0 +1,31 @@
+# Virtual Environments
+venv/
+env/
+.venv/
+
+# Python cache and build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Databases (Local SQLite)
+*.db
+local.db
+
+# Sensitive Configs (MongoDB/Email Credentials)
+config.env
+.env
+
+# Temporary Generated Images
+session_qr.png
+
+# Large Model Files (Optional)
+# If your .pt or .onnx files are >100MB, GitHub may reject them. 
+# Only include them if you want them public.
+# models/*.pt
+# models/*.onnx
+
+# System files
+.DS_Store
