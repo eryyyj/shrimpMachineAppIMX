@@ -5,7 +5,7 @@ from ultralytics import YOLO
 import numpy as np
 
 class ShrimpDetector:
-    def __init__(self, model_path="models/YOLOShrimpV1.1_ncnn_model", conf_thresh=0.70, imgsz=416):
+    def __init__(self, model_path="models/YOLOShrimpV1.1_ncnn_model", conf_thresh=0.25, imgsz=416):
         """
         Initialize NCNN model.
         CRITICAL: imgsz must match the size used during 'yolo export'.
@@ -164,11 +164,13 @@ class ShrimpDetector:
                 cv2.rectangle(vis_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
             # Draw Tracks
-            for tid, (cx, cy, _) in self.active_tracks.items():
-                if 0 <= cx < w and 0 <= cy < h:
-                    color = (0, 0, 255) if tid in self.counted_track_ids else (255, 0, 0)
-                    cv2.circle(vis_frame, (cx, cy), 5, color, -1)
-                    cv2.putText(vis_frame, str(tid), (cx+5, cy-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            # Draw Tracks (ONLY if they were seen in THIS frame)
+            for tid, (cx, cy, unseen_frames) in self.active_tracks.items():
+                if unseen_frames == 0:  # <--- ONLY DRAW IF SEEN RIGHT NOW
+                    if 0 <= cx < w and 0 <= cy < h:
+                        color = (0, 0, 255) if tid in self.counted_track_ids else (255, 0, 0)
+                        cv2.circle(vis_frame, (cx, cy), 5, color, -1)
+                        cv2.putText(vis_frame, str(tid), (cx+5, cy-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
             # Draw Stats
             fps = int(1000 / inference_time) if inference_time > 0 else 0

@@ -31,8 +31,52 @@ def init_db():
         synced INTEGER DEFAULT 0
     )
     """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS session (
+        id INTEGER PRIMARY KEY CHECK (id = 1), -- Ensure only one active session
+        userId TEXT,
+        expiry TEXT
+    )
+    """)
+
     conn.commit()
     conn.close()
+
+def get_active_session():
+    """Returns userId if a valid session exists, else None."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT userId, expiry FROM session WHERE id = 1").fetchone()
+        conn.close()
+        if row:
+            uid, expiry_str = row
+            expiry = datetime.datetime.fromisoformat(expiry_str)
+            if datetime.datetime.now() < expiry:
+                return uid
+            else:
+                clear_session() 
+    except Exception as e:
+        print(f"Session check error: {e}")
+    return None
+
+def save_session(user_id, days=30):
+    expiry = (datetime.datetime.now() + datetime.timedelta(days=days)).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("INSERT OR REPLACE INTO session (id, userId, expiry) VALUES (1, ?, ?)", (user_id, expiry))
+    conn.commit()
+    conn.close()
+
+def clear_session():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM session")
+    conn.commit()
+    conn.close()
+
+def get_cached_username(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()
+    conn.close()
+    return row[0] if row else "User"
 
 # QR Handshake Functions
 def create_qr_session():

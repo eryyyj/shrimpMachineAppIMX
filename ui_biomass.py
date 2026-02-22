@@ -146,12 +146,12 @@ class BiomassWindow(QtWidgets.QWidget):
         self.btn_set = self.create_btn("SET TARGET", COLOR_TEAL)
         self.btn_start = self.create_btn("START", COLOR_TEAL)
         
-        self.btn_secret = QtWidgets.QPushButton(self.btn_start)
-        self.btn_secret.setGeometry(0, 0, 300, 25)  
-        self.btn_secret.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.btn_secret.setStyleSheet("background-color: transparent; border: none;")
-        self.btn_secret.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
-        self.btn_secret.clicked.connect(self.start_secret)
+        self.btn_serviceoverlay = QtWidgets.QPushButton(self.btn_start)
+        self.btn_serviceoverlay.setGeometry(0, 0, 300, 25)  
+        self.btn_serviceoverlay.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.btn_serviceoverlay.setStyleSheet("background-color: transparent; border: none;")
+        self.btn_serviceoverlay.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        self.btn_serviceoverlay.clicked.connect(self.start_serviceoverlay)
 
         self.btn_stop = self.create_btn("STOP", COLOR_NEUTRAL)
         self.btn_stop.setEnabled(False)
@@ -215,7 +215,7 @@ class BiomassWindow(QtWidgets.QWidget):
         self.threshold_reached = False
         self.lbl_count.setText("Count: 0")
         self.lbl_target.setText("Target: Not Set")
-        self.lbl_status.setText("SYSTEM RESET / DOOR OPEN")
+        self.lbl_status.setText("SYSTEM RESET")
         self.mqtt.publish("shrimp/servo1/command", "SERVO1_OPEN")
         
         self.btn_stop.setEnabled(False)
@@ -230,8 +230,8 @@ class BiomassWindow(QtWidgets.QWidget):
         self.detect_enabled = True # Enable detection
         self._start_common("RUNNING...")
 
-    def start_secret(self):
-        self.detect_enabled = False # Disable detection
+    def start_serviceoverlay(self):
+        self.detect_enabled = False
         self._start_common("RUNNING...")
 
     def _start_common(self, status_text):
@@ -312,7 +312,7 @@ class BiomassWindow(QtWidgets.QWidget):
                 if self.threshold_count > 0 and count >= self.threshold_count:
                     self.mqtt.publish("shrimp/servo1/command", "SERVO1_CLOSE")
                     self.threshold_reached = True
-                    self.lbl_status.setText("TARGET REACHED / DOOR CLOSED")
+                    self.lbl_status.setText("TARGET REACHED")
                 
                 # Update text stats
                 self.lbl_count.setText(f"Count: {count}")
@@ -330,7 +330,7 @@ class BiomassWindow(QtWidgets.QWidget):
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
             else:
-                # Secret Mode / Detection Disabled
+                
                 h, w = frame.shape[:2]
                 line_x = int(w * 0.3) 
                 cv2.line(frame, (line_x, 0), (line_x, h), (0, 255, 255), 2)

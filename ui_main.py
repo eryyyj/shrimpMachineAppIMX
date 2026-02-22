@@ -20,9 +20,18 @@ class MainMenu(QtWidgets.QWidget):
         # Window Configuration
         self.setWindowFlag(QtCore.Qt.FramelessWindowHint)
         self.setFixedSize(1024, 600)
-        
-        # Background color
-        self.setStyleSheet("background-color: #FAF7F2;") 
+        self.setStyleSheet("background-color: #FAF7F2;")
+
+        # --- FLOATING BACK BUTTON ---
+        # We don't add this to a layout so it doesn't take up space
+        self.btn_back = QtWidgets.QPushButton(self)
+        self.btn_back.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowLeft))
+        self.btn_back.setIconSize(QtCore.QSize(35, 35))
+        self.btn_back.setFixedSize(60, 60)
+        self.btn_back.setFlat(True)
+        self.btn_back.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        self.btn_back.move(20, 20) # Manual positioning
+        self.btn_back.clicked.connect(self.close_without_logout)
 
         # Main Layout
         self.main_layout = QtWidgets.QVBoxLayout(self)
@@ -31,31 +40,32 @@ class MainMenu(QtWidgets.QWidget):
 
         # 1. Middle Section: Welcome Text (Left) and Mascot (Right)
         self.mid_layout = QtWidgets.QHBoxLayout()
-        self.mid_layout.setSpacing(0)
-        
-        # Left Side: "Welcome!" with a Fun Script Font
-        self.lblWelcome = QtWidgets.QLabel("Welcome!")
-        # We use a cursive/script font stack to mimic a fun hand-written style
+        self.mid_layout.setSpacing(40)
+       
+        # Welcome Text
+        self.lblWelcome = QtWidgets.QLabel()
+        from database import get_cached_username
+        name = get_cached_username(user_id)
+        self.lblWelcome.setText(f"Welcome,\n{name}!")
+       
         self.lblWelcome.setStyleSheet("""
             font-family: 'Comic Sans MS', 'Brush Script MT', 'Cursive';
-            font-size: 110px; 
-            font-weight: 500; 
-            color: #0D3D45; 
+            font-size: 100px;
+            color: #0D3D45;
             border: none;
         """)
         self.lblWelcome.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-
-        # Right Side: Mascot Image
+       
+        # Mascot Image
         self.lblImage = QtWidgets.QLabel()
         img_path = "/home/hiponpd/Documents/GitHub/ShrimpMachineApp/assets/images/landing.png"
         if os.path.exists(img_path):
             pixmap = QtGui.QPixmap(img_path).scaled(450, 450, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
             self.lblImage.setPixmap(pixmap)
         self.lblImage.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        
+
         self.mid_layout.addWidget(self.lblWelcome, stretch=1)
         self.mid_layout.addWidget(self.lblImage, stretch=1)
-
         self.main_layout.addLayout(self.mid_layout, stretch=4)
 
         # 2. Bottom Section: Controls
@@ -69,7 +79,7 @@ class MainMenu(QtWidgets.QWidget):
             QPushButton {
                 background-color: #111111;
                 color: white;
-                border-radius: 20px; 
+                border-radius: 20px;
                 font-size: 26px;
                 font-weight: bold;
                 letter-spacing: 2px;
@@ -101,23 +111,25 @@ class MainMenu(QtWidgets.QWidget):
         self.btnStart.clicked.connect(self.open_biomass)
         self.btnLogout.clicked.connect(self.logout)
 
+    def close_without_logout(self):
+        """Closes the app but keeps the session in local.db."""
+        self.logout_requested = False
+        self.close()
+
     def open_biomass(self):
         self.bw = BiomassWindow(self.user_id, self)
         self.bw.showFullScreen()
         self.hide()
 
     def logout(self):
+        """Standard logout: clears session from local.db"""
+        from database import clear_session
+        clear_session()
         self.logout_requested = True
         self.close()
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
-    
-    # Force DPI settings for the Raspberry Pi display
-    app.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, False)
-    app.setAttribute(QtCore.Qt.AA_DisableHighDpiScaling, True)
-    app.setAttribute(QtCore.Qt.AA_Use96Dpi, True)
-
     window = MainMenu(user_id="test_user")
     window.showFullScreen()
     sys.exit(app.exec_())

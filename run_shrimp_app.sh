@@ -1,6 +1,11 @@
 #!/bin/bash
 
+# Kill any ghost processes
+sudo pkill -9 rpicam-vid
+sudo pkill -9 ffmpeg
+
 # 1. Enable the virtual camera module (Requires sudo)
+sudo modprobe -r v4l2loopback
 sudo modprobe v4l2loopback video_nr=10 card_label="ShrimpSenseCam" exclusive_caps=1
 
 # 2. Run your WORKING camera command in the background

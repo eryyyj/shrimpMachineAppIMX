@@ -18,6 +18,14 @@ class Login(QtWidgets.QDialog):
         self.session_id = create_qr_session()
         self.user_id = None
 
+        # Create the "Remember Me" checkbox once
+        self.cb_remember = QtWidgets.QCheckBox("Stay logged in")
+        self.cb_remember.setChecked(True)
+        self.cb_remember.setStyleSheet("""
+            QCheckBox { font-size: 16px; color: #0D3D45; font-weight: bold; border: none; }
+            QCheckBox::indicator { width: 22px; height: 22px; }
+        """)
+
         # Use a Stacked Widget to switch between QR and Manual Login
         self.stack = QtWidgets.QStackedWidget()
         self.setup_qr_view()
@@ -95,6 +103,8 @@ class Login(QtWidgets.QDialog):
         card_layout.addWidget(self.qr_label, stretch=1)
         self.main_layout.addWidget(card)
 
+        self.main_layout.addWidget(self.cb_remember, alignment=QtCore.Qt.AlignCenter)
+
         # 3. "Try another way" Link
         self.btn_switch = QtWidgets.QPushButton("Try another way")
         self.btn_switch.setStyleSheet("""
@@ -169,8 +179,17 @@ class Login(QtWidgets.QDialog):
         btn_login.setStyleSheet("background: #111; color: white; padding: 15px; font-weight: bold; border-radius: 8px;")
         btn_login.clicked.connect(self.handle_manual_login)
 
+        self.cb_remember_manual = QtWidgets.QCheckBox("Stay logged in")
+        self.cb_remember_manual.setChecked(True)
+        self.cb_remember_manual.setStyleSheet("color: #333; font-size: 14px; border: none;")
+        
+        # Sync them: If manual is clicked, QR is updated and vice versa
+        self.cb_remember_manual.toggled.connect(self.cb_remember.setChecked)
+        self.cb_remember.toggled.connect(self.cb_remember_manual.setChecked)
+        
         form_layout.addWidget(self.edit_user)
         form_layout.addWidget(self.edit_pass)
+        form_layout.addWidget(self.cb_remember_manual)
         form_layout.addWidget(btn_login)
 
         layout.addWidget(form_card, alignment=QtCore.Qt.AlignCenter)
@@ -183,6 +202,9 @@ class Login(QtWidgets.QDialog):
         uid = verify_user_credentials(user, pw)
         
         if uid:
+            if self.cb_remember.isChecked(): # This will be the same state for both
+                from database import save_session
+                save_session(uid)
             self.user_id = uid
             self.timer.stop()
             self.accept()
@@ -193,6 +215,11 @@ class Login(QtWidgets.QDialog):
         if self.stack.currentIndex() == 0:
             uid = poll_for_login(self.session_id)
             if uid:
+                # ADD THIS BLOCK BELOW
+                if self.cb_remember.isChecked():
+                    from database import save_session
+                    save_session(uid)
+                
                 self.user_id = uid
                 self.timer.stop()
                 self.accept()
@@ -202,15 +229,35 @@ class Login(QtWidgets.QDialog):
         QtCore.QTimer.singleShot(0, self.showFullScreen)
 
 def main():
+    from database import init_db, get_active_session
     init_db()
     app = QtWidgets.QApplication(sys.argv)
+
+    # 1. Check if we should skip login initially
+    current_uid = get_active_session()
+
     while True:
-        login = Login()
-        if not login.exec_(): break
-        main_window = MainMenu(login.user_id)
+        # If we don't have a session, show the Login screen
+        if not current_uid:
+            login = Login()
+            if not login.exec_(): 
+                break # User exited the login screen
+            current_uid = login.user_id
+
+        # 2. Show the Main Menu
+        main_window = MainMenu(current_uid)
         main_window.showFullScreen()
         app.exec_()
-        if not getattr(main_window, "logout_requested", False): break
+        
+        # 3. Check what happened after Main Menu closed
+        if getattr(main_window, "logout_requested", False):
+            # If they logged out, clear the local variable so the next loop shows Login()
+            current_uid = None
+            continue 
+        else:
+            # If they just closed the app normally, stop the loop
+            break
+            
     sys.exit()
 
 if __name__ == "__main__":
