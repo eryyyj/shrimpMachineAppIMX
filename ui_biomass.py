@@ -261,6 +261,10 @@ class BiomassWindow(QtWidgets.QWidget):
         if self.imx500_camera is None:
             self.lbl_status.setText("CAMERA UNAVAILABLE")
             return
+        if self.imx500_worker and self.imx500_worker.isRunning():
+            # Already running; avoid double-starting the worker thread
+            self.lbl_status.setText(status_text)
+            return
         self.running = True
         self.prev_time = time.time()
         self.imx500_worker._stop_requested = False
@@ -308,12 +312,15 @@ class BiomassWindow(QtWidgets.QWidget):
         self.lbl_status.setText("FEED DISPENSED")
 
     def go_back(self):
-        # Stop worker first, then fully release camera resources
+        # Stop worker first, then stop (but do not fully close) camera resources
         if self.imx500_worker and self.imx500_worker.isRunning():
             self.imx500_worker.request_stop()
             self.imx500_worker.wait(3000)
-        if IMX500_AVAILABLE:
-            close_imx500_camera()
+        if self.imx500_camera:
+            try:
+                self.imx500_camera.stop()
+            except Exception:
+                pass
         self.mqtt.disconnect()
         if self.parent:
             self.parent.show()

@@ -19,6 +19,10 @@ MAX_DISTANCE_REAPPEAR = 220 # Larger threshold when matching after detection gap
 MAX_DISAPPEARED = 100       # Frames before removing lost tracks
 NEAR_LINE_PX = 100          # New object in count area within this of line = likely crossed during gap
 
+# De-duplication of counts near the Count Area line
+RECENT_COUNT_TIME = 1.5     # Seconds within which repeated counts near same spot are treated as duplicates
+RECENT_COUNT_DISTANCE = 80  # Max pixel distance for a duplicate count relative to last crossing
+
 # Exposure: high shutter speed reduces motion blur; AnalogueGain compensates for darkness
 EXPOSURE_TIME_US = 7500   # 7.5ms shutter (5000-10000 for 30fps)
 ANALOGUE_GAIN = 5.0       # Compensate for short exposure (tune for your lighting)
@@ -72,10 +76,11 @@ def close_imx500_camera():
         with _camera_lock:
             if _camera_instance:
                 _camera_instance.close()
-                # Keep reference for reuse; is_closed() allows re-init in start()
+                _camera_instance = None
     else:
         if _camera_instance:
             _camera_instance.close()
+            _camera_instance = None
 
 
 class IMX500Camera:
@@ -112,6 +117,7 @@ class IMX500Camera:
         self.tracked_objects = {}
         self.next_object_id = 0
         self.total_shrimp_count = 0
+        self.recent_counts = []  # (timestamp, cx, cy) for recent line-cross events
 
         # IMX500 must be created before Picamera2
         self.imx500 = IMX500(model_path)
@@ -197,6 +203,36 @@ class IMX500Camera:
         ]
         return self.last_detections
 
+    def _prune_recent_counts(self, now: float):
+        """Drop old recent-count entries outside the de-duplication window."""
+        cutoff = now - (RECENT_COUNT_TIME * 2.0)
+        self.recent_counts = [
+            (ts, cx, cy) for (ts, cx, cy) in self.recent_counts if ts >= cutoff
+        ]
+
+    def _is_duplicate_count(self, cx: int, cy: int, now: float) -> bool:
+        """Return True if a new count at (cx, cy) is likely the same shrimp."""
+        for ts, prev_cx, prev_cy in self.recent_counts:
+            if now - ts > RECENT_COUNT_TIME:
+                continue
+            if math.hypot(cx - prev_cx, cy - prev_cy) <= RECENT_COUNT_DISTANCE:
+                return True
+        return False
+
+    def _register_count(self, cx: int, cy: int):
+        """
+        Register a new shrimp count, with short-term spatial/temporal de-duplication.
+        Returns True if the global count was incremented, False if treated as duplicate.
+        """
+        now = time.time()
+        self._prune_recent_counts(now)
+        if self._is_duplicate_count(cx, cy, now):
+            return False
+
+        self.total_shrimp_count += 1
+        self.recent_counts.append((now, cx, cy))
+        return True
+
     def _draw_detections(self, request, stream="main"):
         """Pre-callback: draw detections and run centroid tracking."""
         detections = self.last_results
@@ -276,8 +312,8 @@ class IMX500Camera:
                             and cx > split_x
                             and not self.tracked_objects[obj_id]["counted"]
                         ):
-                            self.total_shrimp_count += 1
-                            self.tracked_objects[obj_id]["counted"] = True
+                            if self._register_count(cx, cy):
+                                self.tracked_objects[obj_id]["counted"] = True
 
                     for obj_id in list(self.tracked_objects.keys()):
                         if obj_id not in used_ids:
@@ -296,8 +332,8 @@ class IMX500Camera:
                                 "disappeared": 0,
                             }
                             if near_line:
-                                self.total_shrimp_count += 1
-                                self.tracked_objects[self.next_object_id]["counted"] = True
+                                if self._register_count(cx, cy):
+                                    self.tracked_objects[self.next_object_id]["counted"] = True
                             elif is_count_area:
                                 self.tracked_objects[self.next_object_id]["counted"] = True
                             self.next_object_id += 1
@@ -388,12 +424,14 @@ class IMX500Camera:
         self.tracked_objects.clear()
         self.next_object_id = 0
         self.total_shrimp_count = 0
+        self.recent_counts.clear()
 
 
 class IMX500Worker(QThread):
     """Background worker that captures frames and emits them to the UI."""
 
     frame_ready = pyqtSignal(object, int)  # (frame: np.ndarray | None, count: int)
+    error = pyqtSignal(str)
 
     def __init__(self, camera: IMX500Camera | None, parent=None):
         super().__init__(parent)
@@ -406,8 +444,9 @@ class IMX500Worker(QThread):
             return
         try:
             self.camera.start()
-        except Exception:
+        except Exception as exc:
             self.frame_ready.emit(None, 0)
+            self.error.emit(f"Camera start failed: {exc}")
             return
 
         while not self._stop_requested:
@@ -418,8 +457,8 @@ class IMX500Worker(QThread):
 
         try:
             self.camera.stop()
-        except Exception:
-            pass
+        except Exception as exc:
+            self.error.emit(f"Camera stop failed: {exc}")
 
     def request_stop(self):
         self._stop_requested = True
