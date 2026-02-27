@@ -118,6 +118,7 @@ class IMX500Camera:
         self.next_object_id = 0
         self.total_shrimp_count = 0
         self.recent_counts = []  # (timestamp, cx, cy) for recent line-cross events
+        self._fw_uploaded = False  # Ensure network firmware is uploaded only once per instance
 
         # IMX500 must be created before Picamera2
         self.imx500 = IMX500(model_path)
@@ -281,7 +282,8 @@ class IMX500Camera:
                             "counted": False,
                             "disappeared": 0,
                         }
-                        if cx > split_x:
+                        # Automatically count any new shrimp that appears in the frame.
+                        if self._register_count(cx, cy):
                             self.tracked_objects[self.next_object_id]["counted"] = True
                         self.next_object_id += 1
                 else:
@@ -323,18 +325,15 @@ class IMX500Camera:
 
                     for i, (cx, cy, x, y, w, h) in enumerate(current_centroids):
                         if i not in used_centroids:
-                            is_count_area = cx > split_x
-                            # Shrimp that appears in count area near the line likely crossed during detection gap
-                            near_line = is_count_area and (cx - split_x) < NEAR_LINE_PX
+                            # New track for a shrimp that wasn't matched to an existing one.
                             self.tracked_objects[self.next_object_id] = {
                                 "centroid": (cx, cy),
-                                "counted": is_count_area,
+                                "counted": False,
                                 "disappeared": 0,
                             }
-                            if near_line:
-                                if self._register_count(cx, cy):
-                                    self.tracked_objects[self.next_object_id]["counted"] = True
-                            elif is_count_area:
+                            # Count immediately on first appearance anywhere in the frame,
+                            # with de-duplication to avoid flicker-based double counts.
+                            if self._register_count(cx, cy):
                                 self.tracked_objects[self.next_object_id]["counted"] = True
                             self.next_object_id += 1
 
@@ -367,7 +366,10 @@ class IMX500Camera:
         config = self.picam2.create_preview_configuration(
             controls={"FrameRate": ir}, buffer_count=12
         )
-        self.imx500.show_network_fw_progress_bar()
+        # Upload network firmware only once; subsequent starts reuse it to avoid hangs.
+        if not self._fw_uploaded:
+            self.imx500.show_network_fw_progress_bar()
+            self._fw_uploaded = True
         self.picam2.start(config, show_preview=False)
         # ScalerCrop + manual exposure to reduce motion blur; AnalogueGain compensates for darkness
         self.picam2.set_controls({
