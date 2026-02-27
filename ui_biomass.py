@@ -1,9 +1,17 @@
-import sys, cv2, datetime, os, time 
+import sys
+import cv2
+import datetime
+import time
 from PyQt5 import QtWidgets, QtGui, QtCore
 from compute import compute_feed
-from detector import ShrimpDetector
-from camera import Camera
 from database import save_biomass_record
+
+try:
+    from imx500_camera import IMX500Camera, IMX500Worker
+    IMX500_AVAILABLE = True
+except Exception:
+    IMX500_AVAILABLE = False
+
 from mqtt_client import MqttClient
 
 # --- Aquaculture Palette ---
@@ -55,18 +63,27 @@ class BiomassWindow(QtWidgets.QWidget):
         super().__init__()
         self.user_id = user_id
         self.parent = parent
-        self.detector = ShrimpDetector()
-        self.camera = Camera()
         self.mqtt = MqttClient()
         self.mqtt.connect()
-        
+
+        # IMX500 camera and worker
+        self.imx500_camera = None
+        self.imx500_worker = None
+        if IMX500_AVAILABLE:
+            try:
+                self.imx500_camera = IMX500Camera()
+                self.imx500_worker = IMX500Worker(self.imx500_camera)
+                self.imx500_worker.frame_ready.connect(self.on_frame_ready)
+            except Exception:
+                self.imx500_camera = None
+                self.imx500_worker = None
+
         self.running = False
         self.pump_on = False
         self.threshold_count = 0
         self.threshold_reached = False
-        
-        self.detect_enabled = True 
-
+        self.detect_enabled = True
+        self.current_count = 0
         self.prev_time = 0
 
         self.setWindowFlag(QtCore.Qt.FramelessWindowHint)
@@ -74,9 +91,6 @@ class BiomassWindow(QtWidgets.QWidget):
         self.showFullScreen()
 
         self.init_ui()
-        
-        self.timer = QtCore.QTimer()
-        self.timer.timeout.connect(self.update_frame)
 
     def init_ui(self):
         # Overall vertical layout
@@ -114,7 +128,9 @@ class BiomassWindow(QtWidgets.QWidget):
         self.video_label.setStyleSheet(f"background-color: black; border-radius: 15px; border: 2px solid {COLOR_TEAL};")
         self.video_label.setFixedSize(640, 420)
         
-        self.lbl_status = QtWidgets.QLabel("SYSTEM READY")
+        self.lbl_status = QtWidgets.QLabel(
+            "CAMERA UNAVAILABLE" if self.imx500_camera is None else "SYSTEM READY"
+        )
         self.lbl_status.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {COLOR_AQUA};")
         
         left_layout.addWidget(self.video_label)
@@ -145,6 +161,8 @@ class BiomassWindow(QtWidgets.QWidget):
         
         self.btn_set = self.create_btn("SET TARGET", COLOR_TEAL)
         self.btn_start = self.create_btn("START", COLOR_TEAL)
+        if self.imx500_camera is None:
+            self.btn_start.setEnabled(False)
         
         self.btn_serviceoverlay = QtWidgets.QPushButton(self.btn_start)
         self.btn_serviceoverlay.setGeometry(0, 0, 300, 25)  
@@ -209,15 +227,19 @@ class BiomassWindow(QtWidgets.QWidget):
 
     def reset_all(self):
         self.running = False
-        self.timer.stop()
-        self.detector.reset_total_count()
+        if self.imx500_worker and self.imx500_worker.isRunning():
+            self.imx500_worker.request_stop()
+            self.imx500_worker.wait(2000)
+        if self.imx500_camera:
+            self.imx500_camera.reset_count()
+        self.current_count = 0
         self.threshold_count = 0
         self.threshold_reached = False
         self.lbl_count.setText("Count: 0")
         self.lbl_target.setText("Target: Not Set")
         self.lbl_status.setText("SYSTEM RESET")
         self.mqtt.publish("shrimp/servo1/command", "SERVO1_OPEN")
-        
+
         self.btn_stop.setEnabled(False)
         self.btn_stop.setStyleSheet(self.get_btn_style(COLOR_NEUTRAL))
         self.btn_save.setEnabled(False)
@@ -235,12 +257,16 @@ class BiomassWindow(QtWidgets.QWidget):
         self._start_common("RUNNING...")
 
     def _start_common(self, status_text):
-        """ Shared logic for starting timer and UI updates """
+        """Shared logic for starting camera worker."""
+        if self.imx500_camera is None:
+            self.lbl_status.setText("CAMERA UNAVAILABLE")
+            return
         self.running = True
         self.prev_time = time.time()
-        self.timer.start(100)
+        self.imx500_worker._stop_requested = False
+        self.imx500_worker.start()
         self.lbl_status.setText(status_text)
-        
+
         self.btn_stop.setEnabled(True)
         self.btn_stop.setStyleSheet(self.get_btn_style(COLOR_TEAL))
         self.btn_save.setEnabled(True)
@@ -248,13 +274,15 @@ class BiomassWindow(QtWidgets.QWidget):
 
     def stop(self):
         self.running = False
-        self.timer.stop()
+        if self.imx500_worker and self.imx500_worker.isRunning():
+            self.imx500_worker.request_stop()
+            self.imx500_worker.wait(2000)
         self.lbl_status.setText("STOPPED")
         self.btn_dispense.setEnabled(True)
         self.btn_dispense.setStyleSheet(self.get_btn_style(COLOR_AQUA))
 
     def save(self):
-        count = self.detector.total_count
+        count = self.current_count
         b, f, p, fl = compute_feed(count)
         save_biomass_record(self.user_id, count, b, f)
         
@@ -280,10 +308,14 @@ class BiomassWindow(QtWidgets.QWidget):
         self.lbl_status.setText("FEED DISPENSED")
 
     def go_back(self):
-        self.timer.stop()
+        if self.imx500_worker and self.imx500_worker.isRunning():
+            self.imx500_worker.request_stop()
+            self.imx500_worker.wait(2000)
+        if self.imx500_camera:
+            self.imx500_camera.stop()
         self.mqtt.disconnect()
-        self.camera.release()
-        if self.parent: self.parent.show()
+        if self.parent:
+            self.parent.show()
         self.close()
 
     def set_count(self):
@@ -294,61 +326,43 @@ class BiomassWindow(QtWidgets.QWidget):
                 self.threshold_count = num
                 self.lbl_target.setText(f"Target: {num}")
 
-    def update_frame(self):
-        frame = self.camera.get_frame()
-        if frame is not None:
-            # --- FPS Calculation ---
-            curr_time = time.time()
-            fps = 0
-            if self.prev_time > 0:
-                fps = int(1.0 / (curr_time - self.prev_time))
-            self.prev_time = curr_time
+    def on_frame_ready(self, frame, count):
+        """Handle frame and count from IMX500 worker."""
+        self.current_count = count
 
-            if self.detect_enabled and not self.threshold_reached:
-                # Normal mode: Run detection
-                count, frame_rgb = self.detector.detect(frame)
-                
-                # Check threshold
-                if self.threshold_count > 0 and count >= self.threshold_count:
-                    self.mqtt.publish("shrimp/servo1/command", "SERVO1_CLOSE")
-                    self.threshold_reached = True
-                    self.lbl_status.setText("TARGET REACHED")
-                
-                # Update text stats
-                self.lbl_count.setText(f"Count: {count}")
-                b, f, p, fl = compute_feed(count)
-                self.lbl_bio.setText(f"Biomass: {b:.2f}g\nFeed: {f:.2f}g")
-                
-            elif self.threshold_reached:
-                # Target was reached: Keep showing video but STOP counting/detecting
-                # We call detect with draw=False to just get the current count without processing
-                count = self.detector.total_count
-                
-                # Just draw the count on the frame so the video looks "frozen" in time regarding data
-                cv2.putText(frame, f"FINAL COUNT: {count}", (15, 40), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            else:
-                
-                h, w = frame.shape[:2]
-                line_x = int(w * 0.3) 
-                cv2.line(frame, (line_x, 0), (line_x, h), (0, 255, 255), 2)
-                
-                count = self.detector.total_count
-                stats = f"FPS: {fps} | Count: {count}"
-                
-                (text_w, text_h), _ = cv2.getTextSize(stats, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
-                cv2.rectangle(frame, (10, 10), (10 + text_w + 10, 10 + text_h + 20), (0,0,0), -1)
-                cv2.putText(frame, stats, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if frame is None:
+            self.video_label.setText("No frame")
+            return
 
-            # --- Display logic is shared ---
-            h, w, ch = frame_rgb.shape
-            qimg = QtGui.QImage(frame_rgb.data, w, h, ch * w, QtGui.QImage.Format_RGB888)
-            pix = QtGui.QPixmap.fromImage(qimg).scaled(640, 420, QtCore.Qt.KeepAspectRatio)
-            self.video_label.setPixmap(pix)
+        # Threshold check when detection enabled
+        if self.detect_enabled and not self.threshold_reached:
+            if self.threshold_count > 0 and count >= self.threshold_count:
+                self.mqtt.publish("shrimp/servo1/command", "SERVO1_CLOSE")
+                self.threshold_reached = True
+                self.lbl_status.setText("TARGET REACHED")
+
+        # Update display
+        self.lbl_count.setText(f"Count: {count}")
+        b, f, p, fl = compute_feed(count)
+        self.lbl_bio.setText(f"Biomass: {b:.2f}g\nFeed: {f:.2f}g")
+
+        # Overlay "FINAL COUNT" when target reached
+        if self.threshold_reached:
+            cv2.putText(
+                frame, f"FINAL COUNT: {count}", (15, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2
+            )
+
+        # Convert to RGB for display (picamera2 may return BGRA)
+        if frame.shape[2] == 4:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
+        else:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        h, w, ch = frame_rgb.shape
+        qimg = QtGui.QImage(frame_rgb.data, w, h, ch * w, QtGui.QImage.Format_RGB888)
+        pix = QtGui.QPixmap.fromImage(qimg).scaled(640, 420, QtCore.Qt.KeepAspectRatio)
+        self.video_label.setPixmap(pix)
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
