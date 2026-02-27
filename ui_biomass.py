@@ -316,7 +316,13 @@ class BiomassWindow(QtWidgets.QWidget):
         self.mqtt.disconnect()
         if self.parent:
             self.parent.show()
-        self.close()
+        self.hide()  # Hide instead of close to reuse IMX500Camera/Picamera2 on next open
+
+    def showEvent(self, event):
+        """Reconnect MQTT when window is shown again (after go_back)."""
+        super().showEvent(event)
+        if hasattr(self, "mqtt") and self.mqtt and not self.mqtt.connected:
+            self.mqtt.connect()
 
     def set_count(self):
         dialog = NumberInputDialog(self)

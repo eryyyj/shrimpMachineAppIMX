@@ -38,6 +38,7 @@ class MqttClient:
     def disconnect(self):
         self.client.loop_stop()
         self.client.disconnect()
+        self.connected = False
         print("MQTT: Python client disconnected.")
 
     def publish(self, topic, payload):

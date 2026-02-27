@@ -117,7 +117,10 @@ class MainMenu(QtWidgets.QWidget):
         self.close()
 
     def open_biomass(self):
-        self.bw = BiomassWindow(self.user_id, self)
+        # Reuse BiomassWindow to avoid "Camera in Configured state" libcamera error.
+        # Creating new IMX500Camera/Picamera2 on each open fails to re-acquire the camera.
+        if not hasattr(self, "bw") or self.bw is None:
+            self.bw = BiomassWindow(self.user_id, self)
         self.bw.showFullScreen()
         self.hide()
 
