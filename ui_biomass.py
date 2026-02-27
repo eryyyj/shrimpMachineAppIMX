@@ -367,7 +367,12 @@ class BiomassWindow(QtWidgets.QWidget):
 
         h, w, ch = frame_rgb.shape
         qimg = QtGui.QImage(frame_rgb.data, w, h, ch * w, QtGui.QImage.Format_RGB888)
-        pix = QtGui.QPixmap.fromImage(qimg).scaled(640, 420, QtCore.Qt.KeepAspectRatio)
+        # Fill entire display area (no black bars); SmoothTransformation for quality
+        pix = QtGui.QPixmap.fromImage(qimg).scaled(
+            640, 420,
+            QtCore.Qt.IgnoreAspectRatio,
+            QtCore.Qt.SmoothTransformation
+        )
         self.video_label.setPixmap(pix)
 
 if __name__ == "__main__":

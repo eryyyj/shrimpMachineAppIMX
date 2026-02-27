@@ -278,7 +278,8 @@ class IMX500Camera:
         )
         self.imx500.show_network_fw_progress_bar()
         self.picam2.start(config, show_preview=False)
-        self.picam2.set_controls({"ScalerCrop": (0, 500, 4056, 2040)})
+        # ScalerCrop (x, y, w, h): use larger region to zoom out; (0, 200, 4056, 2640) shows more of scene
+        self.picam2.set_controls({"ScalerCrop": (0, 200, 4056, 2640)})
         if getattr(self.intrinsics, "preserve_aspect_ratio", False):
             self.imx500.set_auto_aspect_ratio()
         self.picam2.pre_callback = lambda req, s="main": self._draw_detections(req, s)
