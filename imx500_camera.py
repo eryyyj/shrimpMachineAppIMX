@@ -13,9 +13,11 @@ from picamera2 import MappedArray, Picamera2
 from picamera2.devices import IMX500
 from picamera2.devices.imx500 import NetworkIntrinsics, postprocess_nanodet_detection
 
-# Tracking constants
-MAX_DISTANCE = 80
-MAX_DISAPPEARED = 100
+# Tracking constants - tuned for fast-moving shrimp and detection gaps
+MAX_DISTANCE = 140          # Max pixel movement between frames to match same shrimp
+MAX_DISTANCE_REAPPEAR = 220 # Larger threshold when matching after detection gap
+MAX_DISAPPEARED = 100       # Frames before removing lost tracks
+NEAR_LINE_PX = 100          # New object in count area within this of line = likely crossed during gap
 
 # Default config (custom shrimp detection model)
 DEFAULT_MODEL = "/home/hiponpd/my_custom_model/network.rpk"
@@ -213,7 +215,9 @@ class IMX500Camera:
                         for obj_id, data in self.tracked_objects.items():
                             prev_cx, prev_cy = data["centroid"]
                             dist = math.hypot(cx - prev_cx, cy - prev_cy)
-                            if dist <= MAX_DISTANCE:
+                            # Use larger threshold for objects that reappeared after detection gap
+                            max_d = MAX_DISTANCE_REAPPEAR if data["disappeared"] > 0 else MAX_DISTANCE
+                            if dist <= max_d:
                                 distances.append((dist, obj_id, i))
                     distances.sort(key=lambda item: item[0])
 
@@ -242,12 +246,18 @@ class IMX500Camera:
 
                     for i, (cx, cy, x, y, w, h) in enumerate(current_centroids):
                         if i not in used_centroids:
+                            is_count_area = cx > split_x
+                            # Shrimp that appears in count area near the line likely crossed during detection gap
+                            near_line = is_count_area and (cx - split_x) < NEAR_LINE_PX
                             self.tracked_objects[self.next_object_id] = {
                                 "centroid": (cx, cy),
-                                "counted": False,
+                                "counted": is_count_area,
                                 "disappeared": 0,
                             }
-                            if cx > split_x:
+                            if near_line:
+                                self.total_shrimp_count += 1
+                                self.tracked_objects[self.next_object_id]["counted"] = True
+                            elif is_count_area:
                                 self.tracked_objects[self.next_object_id]["counted"] = True
                             self.next_object_id += 1
 
