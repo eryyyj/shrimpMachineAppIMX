@@ -74,6 +74,7 @@ class BiomassWindow(QtWidgets.QWidget):
                 self.imx500_camera = get_imx500_camera()
                 self.imx500_worker = IMX500Worker(self.imx500_camera)
                 self.imx500_worker.frame_ready.connect(self.on_frame_ready)
+                self.imx500_worker.error.connect(self.on_worker_error)
             except Exception:
                 self.imx500_camera = None
                 self.imx500_worker = None
@@ -382,6 +383,10 @@ class BiomassWindow(QtWidgets.QWidget):
             QtCore.Qt.SmoothTransformation
         )
         self.video_label.setPixmap(pix)
+
+    def on_worker_error(self, message: str):
+        """Display worker/camera errors in the status label."""
+        self.lbl_status.setText(message)
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
