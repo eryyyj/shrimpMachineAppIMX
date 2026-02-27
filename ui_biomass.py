@@ -313,25 +313,39 @@ class BiomassWindow(QtWidgets.QWidget):
         self.lbl_status.setText("FEED DISPENSED")
 
     def go_back(self):
-        # Stop worker first, then stop (but do not fully close) camera resources
+        # Stop worker and fully release camera resources so model reloads cleanly next time
         if self.imx500_worker and self.imx500_worker.isRunning():
             self.imx500_worker.request_stop()
             self.imx500_worker.wait(3000)
-        if self.imx500_camera:
+        if IMX500_AVAILABLE:
             try:
-                self.imx500_camera.stop()
+                close_imx500_camera()
             except Exception:
                 pass
+        self.imx500_camera = None
+        self.imx500_worker = None
         self.mqtt.disconnect()
         if self.parent:
             self.parent.show()
         self.hide()
 
     def showEvent(self, event):
-        """Reconnect MQTT when page is entered. Camera start() re-inits Picamera2 if closed."""
+        """Reconnect MQTT and recreate camera/worker when page is entered."""
         super().showEvent(event)
         if hasattr(self, "mqtt") and self.mqtt and not self.mqtt.connected:
             self.mqtt.connect()
+        # Recreate camera and worker if they were closed when leaving this page
+        if IMX500_AVAILABLE and (self.imx500_camera is None or self.imx500_camera.is_closed()):
+            try:
+                self.imx500_camera = get_imx500_camera()
+                self.imx500_worker = IMX500Worker(self.imx500_camera)
+                self.imx500_worker.frame_ready.connect(self.on_frame_ready)
+                self.imx500_worker.error.connect(self.on_worker_error)
+                self.lbl_status.setText("SYSTEM READY")
+            except Exception as exc:
+                self.imx500_camera = None
+                self.imx500_worker = None
+                self.lbl_status.setText(f"Camera init failed: {exc}")
 
     def set_count(self):
         dialog = NumberInputDialog(self)

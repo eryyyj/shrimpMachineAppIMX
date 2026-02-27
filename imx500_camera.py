@@ -245,6 +245,7 @@ class IMX500Camera:
 
         with MappedArray(request, stream) as m:
             height, width = m.array.shape[:2]
+            # 30% Detection Area (left), 70% Count Area (right)
             split_x = int(width * DETECTION_AREA_RATIO)
 
             cv2.line(m.array, (split_x, 0), (split_x, height), (255, 0, 0, 255), 2)
@@ -271,7 +272,7 @@ class IMX500Camera:
                 )
                 cv2.circle(m.array, (cx, cy), 3, (0, 0, 255, 255), -1)
 
-            # Centroid tracking
+            # Original centroid tracking / counting logic (line crossing + near-line)
             if len(current_centroids) == 0:
                 for obj_id in list(self.tracked_objects.keys()):
                     self.tracked_objects[obj_id]["disappeared"] += 1
@@ -285,10 +286,8 @@ class IMX500Camera:
                             "counted": False,
                             "disappeared": 0,
                         }
-                        # Count if it appears in the Count Area (right side).
                         if cx > split_x:
-                            if self._register_count(cx, cy):
-                                self.tracked_objects[self.next_object_id]["counted"] = True
+                            self.tracked_objects[self.next_object_id]["counted"] = True
                         self.next_object_id += 1
                 else:
                     used_centroids = set()
@@ -298,8 +297,11 @@ class IMX500Camera:
                         for obj_id, data in self.tracked_objects.items():
                             prev_cx, prev_cy = data["centroid"]
                             dist = math.hypot(cx - prev_cx, cy - prev_cy)
-                            # Use larger threshold for objects that reappeared after detection gap
-                            max_d = MAX_DISTANCE_REAPPEAR if data["disappeared"] > 0 else MAX_DISTANCE
+                            max_d = (
+                                MAX_DISTANCE_REAPPEAR
+                                if data["disappeared"] > 0
+                                else MAX_DISTANCE
+                            )
                             if dist <= max_d:
                                 distances.append((dist, obj_id, i))
                     distances.sort(key=lambda item: item[0])
@@ -318,8 +320,8 @@ class IMX500Camera:
                             and cx > split_x
                             and not self.tracked_objects[obj_id]["counted"]
                         ):
-                            if self._register_count(cx, cy):
-                                self.tracked_objects[obj_id]["counted"] = True
+                            self.total_shrimp_count += 1
+                            self.tracked_objects[obj_id]["counted"] = True
 
                     for obj_id in list(self.tracked_objects.keys()):
                         if obj_id not in used_ids:
@@ -331,23 +333,16 @@ class IMX500Camera:
                         if i not in used_centroids:
                             is_count_area = cx > split_x
                             near_line = is_count_area and (cx - split_x) < NEAR_LINE_PX
-                            # New track for a shrimp that wasn't matched to an existing one.
                             self.tracked_objects[self.next_object_id] = {
                                 "centroid": (cx, cy),
-                                "counted": False,
+                                "counted": is_count_area,
                                 "disappeared": 0,
                             }
-                            # Count when it appears/enters the Count Area; de-dup prevents flicker double counts.
-                            if is_count_area:
-                                if self._register_count(cx, cy):
-                                    self.tracked_objects[self.next_object_id]["counted"] = True
-                                else:
-                                    # Duplicate: still mark as counted so it won't count again on a later crossing.
-                                    self.tracked_objects[self.next_object_id]["counted"] = True
-                            elif near_line:
-                                # Kept for safety; near_line implies is_count_area, but left here for clarity.
-                                if self._register_count(cx, cy):
-                                    self.tracked_objects[self.next_object_id]["counted"] = True
+                            if near_line:
+                                self.total_shrimp_count += 1
+                                self.tracked_objects[self.next_object_id]["counted"] = True
+                            elif is_count_area:
+                                self.tracked_objects[self.next_object_id]["counted"] = True
                             self.next_object_id += 1
 
             cv2.putText(
