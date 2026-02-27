@@ -19,6 +19,9 @@ MAX_DISTANCE_REAPPEAR = 220 # Larger threshold when matching after detection gap
 MAX_DISAPPEARED = 100       # Frames before removing lost tracks
 NEAR_LINE_PX = 100          # New object in count area within this of line = likely crossed during gap
 
+# Area split (Detection Area on left, Count Area on right)
+DETECTION_AREA_RATIO = 0.30  # 30% detection area, 70% count area
+
 # De-duplication of counts near the Count Area line
 RECENT_COUNT_TIME = 1.5     # Seconds within which repeated counts near same spot are treated as duplicates
 RECENT_COUNT_DISTANCE = 80  # Max pixel distance for a duplicate count relative to last crossing
@@ -242,7 +245,7 @@ class IMX500Camera:
 
         with MappedArray(request, stream) as m:
             height, width = m.array.shape[:2]
-            split_x = int(width * 0.70)
+            split_x = int(width * DETECTION_AREA_RATIO)
 
             cv2.line(m.array, (split_x, 0), (split_x, height), (255, 0, 0, 255), 2)
             cv2.putText(
@@ -282,9 +285,10 @@ class IMX500Camera:
                             "counted": False,
                             "disappeared": 0,
                         }
-                        # Automatically count any new shrimp that appears in the frame.
-                        if self._register_count(cx, cy):
-                            self.tracked_objects[self.next_object_id]["counted"] = True
+                        # Count if it appears in the Count Area (right side).
+                        if cx > split_x:
+                            if self._register_count(cx, cy):
+                                self.tracked_objects[self.next_object_id]["counted"] = True
                         self.next_object_id += 1
                 else:
                     used_centroids = set()
@@ -325,16 +329,25 @@ class IMX500Camera:
 
                     for i, (cx, cy, x, y, w, h) in enumerate(current_centroids):
                         if i not in used_centroids:
+                            is_count_area = cx > split_x
+                            near_line = is_count_area and (cx - split_x) < NEAR_LINE_PX
                             # New track for a shrimp that wasn't matched to an existing one.
                             self.tracked_objects[self.next_object_id] = {
                                 "centroid": (cx, cy),
                                 "counted": False,
                                 "disappeared": 0,
                             }
-                            # Count immediately on first appearance anywhere in the frame,
-                            # with de-duplication to avoid flicker-based double counts.
-                            if self._register_count(cx, cy):
-                                self.tracked_objects[self.next_object_id]["counted"] = True
+                            # Count when it appears/enters the Count Area; de-dup prevents flicker double counts.
+                            if is_count_area:
+                                if self._register_count(cx, cy):
+                                    self.tracked_objects[self.next_object_id]["counted"] = True
+                                else:
+                                    # Duplicate: still mark as counted so it won't count again on a later crossing.
+                                    self.tracked_objects[self.next_object_id]["counted"] = True
+                            elif near_line:
+                                # Kept for safety; near_line implies is_count_area, but left here for clarity.
+                                if self._register_count(cx, cy):
+                                    self.tracked_objects[self.next_object_id]["counted"] = True
                             self.next_object_id += 1
 
             cv2.putText(
@@ -355,9 +368,13 @@ class IMX500Camera:
     def start(self):
         """Start camera and inference pipeline."""
         # Recreate Picamera2 after close() released it (avoids libcamera "Configured state" error).
+        recreated = False
         if self.picam2 is None or self._closed:
             self.picam2 = Picamera2(self.imx500.camera_num)
             self._closed = False
+            recreated = True
+            # If we had to re-acquire the camera, allow firmware upload again.
+            self._fw_uploaded = False
         ir = getattr(
             self.intrinsics,
             "inference_rate",
@@ -366,8 +383,8 @@ class IMX500Camera:
         config = self.picam2.create_preview_configuration(
             controls={"FrameRate": ir}, buffer_count=12
         )
-        # Upload network firmware only once; subsequent starts reuse it to avoid hangs.
-        if not self._fw_uploaded:
+        # Upload network firmware only when (re)acquiring the camera.
+        if recreated and not self._fw_uploaded:
             self.imx500.show_network_fw_progress_bar()
             self._fw_uploaded = True
         self.picam2.start(config, show_preview=False)
