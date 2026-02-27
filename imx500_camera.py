@@ -19,6 +19,10 @@ MAX_DISTANCE_REAPPEAR = 220 # Larger threshold when matching after detection gap
 MAX_DISAPPEARED = 100       # Frames before removing lost tracks
 NEAR_LINE_PX = 100          # New object in count area within this of line = likely crossed during gap
 
+# Exposure: high shutter speed reduces motion blur; AnalogueGain compensates for darkness
+EXPOSURE_TIME_US = 7500   # 7.5ms shutter (5000-10000 for 30fps)
+ANALOGUE_GAIN = 5.0       # Compensate for short exposure (tune for your lighting)
+
 # Default config (custom shrimp detection model)
 DEFAULT_MODEL = "/home/hiponpd/my_custom_model/network.rpk"
 DEFAULT_LABELS = "/home/hiponpd/Downloads/best_imx_model/labels.txt"
@@ -35,6 +39,43 @@ class Detection:
         self.category = category
         self.conf = conf
         self.box = imx500.convert_inference_coords(coords, metadata, picam2)
+
+
+# Singleton: only one IMX500 camera instance app-wide to prevent hardware conflicts
+_camera_instance = None
+_camera_lock = None
+
+try:
+    import threading
+    _camera_lock = threading.Lock()
+except ImportError:
+    pass
+
+
+def get_imx500_camera(**kwargs):
+    """Get or create the singleton IMX500Camera instance."""
+    global _camera_instance
+    if _camera_lock:
+        with _camera_lock:
+            if _camera_instance is None:
+                _camera_instance = IMX500Camera(**kwargs)
+            return _camera_instance
+    if _camera_instance is None:
+        _camera_instance = IMX500Camera(**kwargs)
+    return _camera_instance
+
+
+def close_imx500_camera():
+    """Release camera resources when leaving the biomass page."""
+    global _camera_instance
+    if _camera_lock:
+        with _camera_lock:
+            if _camera_instance:
+                _camera_instance.close()
+                # Keep reference for reuse; is_closed() allows re-init in start()
+    else:
+        if _camera_instance:
+            _camera_instance.close()
 
 
 class IMX500Camera:
@@ -105,9 +146,9 @@ class IMX500Camera:
 
         self.intrinsics.update_with_defaults()
 
-        # Create Picamera2 once and reuse for start/stop cycles.
-        # Creating new Picamera2 on each start causes libcamera "Configured state" error.
+        # Create Picamera2; will be recreated in start() after close() releases it.
         self.picam2 = Picamera2(self.imx500.camera_num)
+        self._closed = False
 
     def _get_labels(self):
         labels = self.intrinsics.labels or []
@@ -278,6 +319,10 @@ class IMX500Camera:
 
     def start(self):
         """Start camera and inference pipeline."""
+        # Recreate Picamera2 after close() released it (avoids libcamera "Configured state" error).
+        if self.picam2 is None or self._closed:
+            self.picam2 = Picamera2(self.imx500.camera_num)
+            self._closed = False
         ir = getattr(
             self.intrinsics,
             "inference_rate",
@@ -288,8 +333,12 @@ class IMX500Camera:
         )
         self.imx500.show_network_fw_progress_bar()
         self.picam2.start(config, show_preview=False)
-        # ScalerCrop (x, y, w, h): use larger region to zoom out; (0, 200, 4056, 2640) shows more of scene
-        self.picam2.set_controls({"ScalerCrop": (0, 200, 4056, 2640)})
+        # ScalerCrop + manual exposure to reduce motion blur; AnalogueGain compensates for darkness
+        self.picam2.set_controls({
+            "ScalerCrop": (0, 200, 4056, 2640),
+            "ExposureTime": EXPOSURE_TIME_US,
+            "AnalogueGain": ANALOGUE_GAIN,
+        })
         if getattr(self.intrinsics, "preserve_aspect_ratio", False):
             self.imx500.set_auto_aspect_ratio()
         self.picam2.pre_callback = lambda req, s="main": self._draw_detections(req, s)
@@ -311,13 +360,28 @@ class IMX500Camera:
             return None, self.total_shrimp_count
 
     def stop(self):
-        """Stop camera. Reuses same Picamera2 instance for next start()."""
-        if self.picam2:
+        """Stop camera for start/stop cycles within a session."""
+        if self.picam2 and not self._closed:
             try:
                 self.picam2.stop()
-                time.sleep(0.5)  # Allow libcamera to release camera fully
+                time.sleep(0.5)
             except Exception:
                 pass
+
+    def close(self):
+        """Fully release camera and IMX500 resources when leaving the biomass page."""
+        if self.picam2 and not self._closed:
+            try:
+                self.picam2.pre_callback = None
+                self.picam2.stop()
+            except Exception:
+                pass
+            self.picam2 = None
+            self._closed = True
+            time.sleep(1.5)  # Allow libcamera to fully release before re-acquire
+
+    def is_closed(self):
+        return self._closed
 
     def reset_count(self):
         """Reset tracking and shrimp count."""

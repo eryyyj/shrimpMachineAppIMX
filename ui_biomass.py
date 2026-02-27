@@ -7,7 +7,7 @@ from compute import compute_feed
 from database import save_biomass_record
 
 try:
-    from imx500_camera import IMX500Camera, IMX500Worker
+    from imx500_camera import get_imx500_camera, close_imx500_camera, IMX500Worker
     IMX500_AVAILABLE = True
 except Exception:
     IMX500_AVAILABLE = False
@@ -66,12 +66,12 @@ class BiomassWindow(QtWidgets.QWidget):
         self.mqtt = MqttClient()
         self.mqtt.connect()
 
-        # IMX500 camera and worker
+        # IMX500 camera (singleton) and worker
         self.imx500_camera = None
         self.imx500_worker = None
         if IMX500_AVAILABLE:
             try:
-                self.imx500_camera = IMX500Camera()
+                self.imx500_camera = get_imx500_camera()
                 self.imx500_worker = IMX500Worker(self.imx500_camera)
                 self.imx500_worker.frame_ready.connect(self.on_frame_ready)
             except Exception:
@@ -308,18 +308,19 @@ class BiomassWindow(QtWidgets.QWidget):
         self.lbl_status.setText("FEED DISPENSED")
 
     def go_back(self):
+        # Stop worker first, then fully release camera resources
         if self.imx500_worker and self.imx500_worker.isRunning():
             self.imx500_worker.request_stop()
-            self.imx500_worker.wait(2000)
-        if self.imx500_camera:
-            self.imx500_camera.stop()
+            self.imx500_worker.wait(3000)
+        if IMX500_AVAILABLE:
+            close_imx500_camera()
         self.mqtt.disconnect()
         if self.parent:
             self.parent.show()
-        self.hide()  # Hide instead of close to reuse IMX500Camera/Picamera2 on next open
+        self.hide()
 
     def showEvent(self, event):
-        """Reconnect MQTT when window is shown again (after go_back)."""
+        """Reconnect MQTT when page is entered. Camera start() re-inits Picamera2 if closed."""
         super().showEvent(event)
         if hasattr(self, "mqtt") and self.mqtt and not self.mqtt.connected:
             self.mqtt.connect()
