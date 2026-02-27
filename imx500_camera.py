@@ -36,7 +36,7 @@ SCALER_CROP = (0, 400, 4056, 2200)
 DEFAULT_MODEL = "/home/hiponpd/my_custom_model/network.rpk"
 DEFAULT_LABELS = "/home/hiponpd/Downloads/best_imx_model/labels.txt"
 DEFAULT_FPS = 30
-DEFAULT_THRESHOLD = 0.55
+DEFAULT_THRESHOLD = 0.10
 DEFAULT_IOU = 0.65
 DEFAULT_MAX_DETECTIONS = 10
 
