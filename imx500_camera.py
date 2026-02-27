@@ -103,6 +103,10 @@ class IMX500Camera:
 
         self.intrinsics.update_with_defaults()
 
+        # Create Picamera2 once and reuse for start/stop cycles.
+        # Creating new Picamera2 on each start causes libcamera "Configured state" error.
+        self.picam2 = Picamera2(self.imx500.camera_num)
+
     def _get_labels(self):
         labels = self.intrinsics.labels or []
         if getattr(self.intrinsics, "ignore_dash_labels", False):
@@ -264,7 +268,6 @@ class IMX500Camera:
 
     def start(self):
         """Start camera and inference pipeline."""
-        self.picam2 = Picamera2(self.imx500.camera_num)
         ir = getattr(
             self.intrinsics,
             "inference_rate",
@@ -297,13 +300,13 @@ class IMX500Camera:
             return None, self.total_shrimp_count
 
     def stop(self):
-        """Stop camera."""
+        """Stop camera. Reuses same Picamera2 instance for next start()."""
         if self.picam2:
             try:
                 self.picam2.stop()
+                time.sleep(0.5)  # Allow libcamera to release camera fully
             except Exception:
                 pass
-            self.picam2 = None
 
     def reset_count(self):
         """Reset tracking and shrimp count."""
