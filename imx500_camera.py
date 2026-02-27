@@ -250,14 +250,21 @@ class IMX500Camera:
             # 30% Detection Area (left), 70% Count Area (right)
             split_x = int(width * DETECTION_AREA_RATIO)
 
-            cv2.line(m.array, (split_x, 0), (split_x, height), (255, 0, 0, 255), 2)
+            has_alpha = (m.array.ndim == 3 and m.array.shape[2] == 4)
+            blue = (255, 0, 0, 255) if has_alpha else (255, 0, 0)
+            white = (255, 255, 255, 255) if has_alpha else (255, 255, 255)
+            green = (0, 255, 0, 255) if has_alpha else (0, 255, 0)
+            red = (0, 0, 255, 255) if has_alpha else (0, 0, 255)
+            yellow = (0, 255, 255, 255) if has_alpha else (0, 255, 255)
+
+            cv2.line(m.array, (split_x, 0), (split_x, height), blue, 2)
             cv2.putText(
                 m.array, "Detection Area", (20, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255, 255), 1
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, white, 1
             )
             cv2.putText(
                 m.array, "Count Area", (split_x + 20, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255, 255), 1
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, white, 1
             )
 
             current_centroids = []
@@ -269,10 +276,10 @@ class IMX500Camera:
                     m.array,
                     (int(x), int(y)),
                     (int(x + w), int(y + h)),
-                    (0, 255, 0, 255),
+                    green,
                     1,
                 )
-                cv2.circle(m.array, (cx, cy), 3, (0, 0, 255, 255), -1)
+                cv2.circle(m.array, (cx, cy), 3, red, -1)
 
             # Original centroid tracking / counting logic (line crossing + near-line)
             if len(current_centroids) == 0:
@@ -349,7 +356,7 @@ class IMX500Camera:
 
             cv2.putText(
                 m.array, f"Live Count: {self.total_shrimp_count}",
-                (split_x + 20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255, 255), 2
+                (split_x + 20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, yellow, 2
             )
 
             if getattr(self.intrinsics, "preserve_aspect_ratio", False):
@@ -377,8 +384,11 @@ class IMX500Camera:
             "inference_rate",
             getattr(self.intrinsics, "fps", 10),
         )
+        # Force BGR output so OpenCV/UI channel order is correct (avoids "blue skin" tint).
         config = self.picam2.create_preview_configuration(
-            controls={"FrameRate": ir}, buffer_count=12
+            main={"format": "BGR888"},
+            controls={"FrameRate": ir},
+            buffer_count=12,
         )
         # Upload network firmware only when (re)acquiring the camera.
         if recreated and not self._fw_uploaded:
