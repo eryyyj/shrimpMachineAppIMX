@@ -20,15 +20,17 @@ MAX_DISAPPEARED = 100       # Frames before removing lost tracks
 NEAR_LINE_PX = 100          # New object in count area within this of line = likely crossed during gap
 
 # Area split (Detection Area on left, Count Area on right)
-DETECTION_AREA_RATIO = 0.30  # 30% detection area, 70% count area
+DETECTION_AREA_RATIO = 0.50  # 50% detection area, 50% count area
 
 # De-duplication of counts near the Count Area line
 RECENT_COUNT_TIME = 1.5     # Seconds within which repeated counts near same spot are treated as duplicates
 RECENT_COUNT_DISTANCE = 80  # Max pixel distance for a duplicate count relative to last crossing
 
-# Exposure: high shutter speed reduces motion blur; AnalogueGain compensates for darkness
-EXPOSURE_TIME_US = 7500   # 7.5ms shutter (5000-10000 for 30fps)
-ANALOGUE_GAIN = 5.0       # Compensate for short exposure (tune for your lighting)
+# Exposure / zoom crop: high shutter speed reduces motion blur; AnalogueGain compensates for darkness
+EXPOSURE_TIME_US = 7500     # 7.5ms shutter (5000-10000 for 30fps)
+ANALOGUE_GAIN = 5.0         # Compensate for short exposure (tune for your lighting)
+# Zoom-in crop to remove unused top/bottom areas (x, y, width, height)
+SCALER_CROP = (0, 400, 4056, 2200)
 
 # Default config (custom shrimp detection model)
 DEFAULT_MODEL = "/home/hiponpd/my_custom_model/network.rpk"
@@ -383,9 +385,9 @@ class IMX500Camera:
             self.imx500.show_network_fw_progress_bar()
             self._fw_uploaded = True
         self.picam2.start(config, show_preview=False)
-        # ScalerCrop + manual exposure to reduce motion blur; AnalogueGain compensates for darkness
+        # ScalerCrop (zoom in) + manual exposure to reduce motion blur; AnalogueGain compensates for darkness
         self.picam2.set_controls({
-            "ScalerCrop": (0, 200, 4056, 2640),
+            "ScalerCrop": SCALER_CROP,
             "ExposureTime": EXPOSURE_TIME_US,
             "AnalogueGain": ANALOGUE_GAIN,
         })
