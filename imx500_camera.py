@@ -26,9 +26,9 @@ DETECTION_AREA_RATIO = 0.50  # 50% detection area, 50% count area
 RECENT_COUNT_TIME = 1.5     # Seconds within which repeated counts near same spot are treated as duplicates
 RECENT_COUNT_DISTANCE = 80  # Max pixel distance for a duplicate count relative to last crossing
 
-# Exposure / zoom crop: high shutter speed reduces motion blur; AnalogueGain compensates for darkness
+# Exposure / zoom crop: high shutter speed reduces motion blur
 EXPOSURE_TIME_US = 7500     # 7.5ms shutter (5000-10000 for 30fps)
-ANALOGUE_GAIN = 5.0         # Compensate for short exposure (tune for your lighting)
+ANALOGUE_GAIN = 2.0         # Lower with extra light (e.g. 1.0–2.0); raise if too dark (e.g. 3.0–5.0)
 # Zoom-in crop to remove unused top/bottom areas (x, y, width, height)
 SCALER_CROP = (0, 400, 4056, 2200)
 
@@ -38,7 +38,7 @@ DEFAULT_LABELS = "/home/hiponpd/Downloads/best_imx_model/labels.txt"
 DEFAULT_FPS = 30
 DEFAULT_THRESHOLD = 0.10
 DEFAULT_IOU = 0.65
-DEFAULT_MAX_DETECTIONS = 10
+DEFAULT_MAX_DETECTIONS = 20
 
 
 class Detection:
