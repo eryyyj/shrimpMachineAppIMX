@@ -7,7 +7,7 @@ from compute import compute_feed
 from database import save_biomass_record
 
 try:
-    from imx500_camera import IMX500Camera, IMX500Worker
+    from imx500_camera import get_imx500_camera, close_imx500_camera, IMX500Worker
     IMX500_AVAILABLE = True
 except Exception:
     IMX500_AVAILABLE = False
@@ -66,14 +66,15 @@ class BiomassWindow(QtWidgets.QWidget):
         self.mqtt = MqttClient()
         self.mqtt.connect()
 
-        # IMX500 camera and worker
+        # IMX500 camera (singleton) and worker
         self.imx500_camera = None
         self.imx500_worker = None
         if IMX500_AVAILABLE:
             try:
-                self.imx500_camera = IMX500Camera()
+                self.imx500_camera = get_imx500_camera()
                 self.imx500_worker = IMX500Worker(self.imx500_camera)
                 self.imx500_worker.frame_ready.connect(self.on_frame_ready)
+                self.imx500_worker.error.connect(self.on_worker_error)
             except Exception:
                 self.imx500_camera = None
                 self.imx500_worker = None
@@ -261,6 +262,10 @@ class BiomassWindow(QtWidgets.QWidget):
         if self.imx500_camera is None:
             self.lbl_status.setText("CAMERA UNAVAILABLE")
             return
+        if self.imx500_worker and self.imx500_worker.isRunning():
+            # Already running; avoid double-starting the worker thread
+            self.lbl_status.setText(status_text)
+            return
         self.running = True
         self.prev_time = time.time()
         self.imx500_worker._stop_requested = False
@@ -308,21 +313,39 @@ class BiomassWindow(QtWidgets.QWidget):
         self.lbl_status.setText("FEED DISPENSED")
 
     def go_back(self):
+        # Stop worker and fully release camera resources so model reloads cleanly next time
         if self.imx500_worker and self.imx500_worker.isRunning():
             self.imx500_worker.request_stop()
-            self.imx500_worker.wait(2000)
-        if self.imx500_camera:
-            self.imx500_camera.stop()
+            self.imx500_worker.wait(3000)
+        if IMX500_AVAILABLE:
+            try:
+                close_imx500_camera()
+            except Exception:
+                pass
+        self.imx500_camera = None
+        self.imx500_worker = None
         self.mqtt.disconnect()
         if self.parent:
             self.parent.show()
-        self.hide()  # Hide instead of close to reuse IMX500Camera/Picamera2 on next open
+        self.hide()
 
     def showEvent(self, event):
-        """Reconnect MQTT when window is shown again (after go_back)."""
+        """Reconnect MQTT and recreate camera/worker when page is entered."""
         super().showEvent(event)
         if hasattr(self, "mqtt") and self.mqtt and not self.mqtt.connected:
             self.mqtt.connect()
+        # Recreate camera and worker if they were closed when leaving this page
+        if IMX500_AVAILABLE and (self.imx500_camera is None or self.imx500_camera.is_closed()):
+            try:
+                self.imx500_camera = get_imx500_camera()
+                self.imx500_worker = IMX500Worker(self.imx500_camera)
+                self.imx500_worker.frame_ready.connect(self.on_frame_ready)
+                self.imx500_worker.error.connect(self.on_worker_error)
+                self.lbl_status.setText("SYSTEM READY")
+            except Exception as exc:
+                self.imx500_camera = None
+                self.imx500_worker = None
+                self.lbl_status.setText(f"Camera init failed: {exc}")
 
     def set_count(self):
         dialog = NumberInputDialog(self)
@@ -374,6 +397,10 @@ class BiomassWindow(QtWidgets.QWidget):
             QtCore.Qt.SmoothTransformation
         )
         self.video_label.setPixmap(pix)
+
+    def on_worker_error(self, message: str):
+        """Display worker/camera errors in the status label."""
+        self.lbl_status.setText(message)
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)

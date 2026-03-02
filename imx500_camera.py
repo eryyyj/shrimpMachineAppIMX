@@ -19,13 +19,26 @@ MAX_DISTANCE_REAPPEAR = 220 # Larger threshold when matching after detection gap
 MAX_DISAPPEARED = 100       # Frames before removing lost tracks
 NEAR_LINE_PX = 100          # New object in count area within this of line = likely crossed during gap
 
+# Area split (Detection Area on left, Count Area on right)
+DETECTION_AREA_RATIO = 0.50  # 50% detection area, 50% count area
+
+# De-duplication of counts near the Count Area line
+RECENT_COUNT_TIME = 1.5     # Seconds within which repeated counts near same spot are treated as duplicates
+RECENT_COUNT_DISTANCE = 80  # Max pixel distance for a duplicate count relative to last crossing
+
+# Exposure / zoom crop: high shutter speed reduces motion blur
+EXPOSURE_TIME_US = 7500     # 7.5ms shutter (5000-10000 for 30fps)
+ANALOGUE_GAIN = 2.0         # Lower with extra light (e.g. 1.0–2.0); raise if too dark (e.g. 3.0–5.0)
+# Zoom-in crop to remove unused top/bottom areas (x, y, width, height)
+SCALER_CROP = (0, 400, 4056, 2200)
+
 # Default config (custom shrimp detection model)
 DEFAULT_MODEL = "/home/hiponpd/my_custom_model/network.rpk"
 DEFAULT_LABELS = "/home/hiponpd/Downloads/best_imx_model/labels.txt"
 DEFAULT_FPS = 30
-DEFAULT_THRESHOLD = 0.55
+DEFAULT_THRESHOLD = 0.10
 DEFAULT_IOU = 0.65
-DEFAULT_MAX_DETECTIONS = 10
+DEFAULT_MAX_DETECTIONS = 20
 
 
 class Detection:
@@ -35,6 +48,44 @@ class Detection:
         self.category = category
         self.conf = conf
         self.box = imx500.convert_inference_coords(coords, metadata, picam2)
+
+
+# Singleton: only one IMX500 camera instance app-wide to prevent hardware conflicts
+_camera_instance = None
+_camera_lock = None
+
+try:
+    import threading
+    _camera_lock = threading.Lock()
+except ImportError:
+    pass
+
+
+def get_imx500_camera(**kwargs):
+    """Get or create the singleton IMX500Camera instance."""
+    global _camera_instance
+    if _camera_lock:
+        with _camera_lock:
+            if _camera_instance is None:
+                _camera_instance = IMX500Camera(**kwargs)
+            return _camera_instance
+    if _camera_instance is None:
+        _camera_instance = IMX500Camera(**kwargs)
+    return _camera_instance
+
+
+def close_imx500_camera():
+    """Release camera resources when leaving the biomass page."""
+    global _camera_instance
+    if _camera_lock:
+        with _camera_lock:
+            if _camera_instance:
+                _camera_instance.close()
+                _camera_instance = None
+    else:
+        if _camera_instance:
+            _camera_instance.close()
+            _camera_instance = None
 
 
 class IMX500Camera:
@@ -71,6 +122,8 @@ class IMX500Camera:
         self.tracked_objects = {}
         self.next_object_id = 0
         self.total_shrimp_count = 0
+        self.recent_counts = []  # (timestamp, cx, cy) for recent line-cross events
+        self._fw_uploaded = False  # Ensure network firmware is uploaded only once per instance
 
         # IMX500 must be created before Picamera2
         self.imx500 = IMX500(model_path)
@@ -105,9 +158,9 @@ class IMX500Camera:
 
         self.intrinsics.update_with_defaults()
 
-        # Create Picamera2 once and reuse for start/stop cycles.
-        # Creating new Picamera2 on each start causes libcamera "Configured state" error.
+        # Create Picamera2; will be recreated in start() after close() releases it.
         self.picam2 = Picamera2(self.imx500.camera_num)
+        self._closed = False
 
     def _get_labels(self):
         labels = self.intrinsics.labels or []
@@ -156,6 +209,36 @@ class IMX500Camera:
         ]
         return self.last_detections
 
+    def _prune_recent_counts(self, now: float):
+        """Drop old recent-count entries outside the de-duplication window."""
+        cutoff = now - (RECENT_COUNT_TIME * 2.0)
+        self.recent_counts = [
+            (ts, cx, cy) for (ts, cx, cy) in self.recent_counts if ts >= cutoff
+        ]
+
+    def _is_duplicate_count(self, cx: int, cy: int, now: float) -> bool:
+        """Return True if a new count at (cx, cy) is likely the same shrimp."""
+        for ts, prev_cx, prev_cy in self.recent_counts:
+            if now - ts > RECENT_COUNT_TIME:
+                continue
+            if math.hypot(cx - prev_cx, cy - prev_cy) <= RECENT_COUNT_DISTANCE:
+                return True
+        return False
+
+    def _register_count(self, cx: int, cy: int):
+        """
+        Register a new shrimp count, with short-term spatial/temporal de-duplication.
+        Returns True if the global count was incremented, False if treated as duplicate.
+        """
+        now = time.time()
+        self._prune_recent_counts(now)
+        if self._is_duplicate_count(cx, cy, now):
+            return False
+
+        self.total_shrimp_count += 1
+        self.recent_counts.append((now, cx, cy))
+        return True
+
     def _draw_detections(self, request, stream="main"):
         """Pre-callback: draw detections and run centroid tracking."""
         detections = self.last_results
@@ -164,16 +247,24 @@ class IMX500Camera:
 
         with MappedArray(request, stream) as m:
             height, width = m.array.shape[:2]
-            split_x = int(width * 0.70)
+            # 30% Detection Area (left), 70% Count Area (right)
+            split_x = int(width * DETECTION_AREA_RATIO)
 
-            cv2.line(m.array, (split_x, 0), (split_x, height), (255, 0, 0, 255), 2)
+            has_alpha = (m.array.ndim == 3 and m.array.shape[2] == 4)
+            blue = (255, 0, 0, 255) if has_alpha else (255, 0, 0)
+            white = (255, 255, 255, 255) if has_alpha else (255, 255, 255)
+            green = (0, 255, 0, 255) if has_alpha else (0, 255, 0)
+            red = (0, 0, 255, 255) if has_alpha else (0, 0, 255)
+            yellow = (0, 255, 255, 255) if has_alpha else (0, 255, 255)
+
+            cv2.line(m.array, (split_x, 0), (split_x, height), blue, 2)
             cv2.putText(
                 m.array, "Detection Area", (20, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255, 255), 1
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, white, 1
             )
             cv2.putText(
                 m.array, "Count Area", (split_x + 20, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255, 255), 1
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, white, 1
             )
 
             current_centroids = []
@@ -185,12 +276,12 @@ class IMX500Camera:
                     m.array,
                     (int(x), int(y)),
                     (int(x + w), int(y + h)),
-                    (0, 255, 0, 255),
+                    green,
                     1,
                 )
-                cv2.circle(m.array, (cx, cy), 3, (0, 0, 255, 255), -1)
+                cv2.circle(m.array, (cx, cy), 3, red, -1)
 
-            # Centroid tracking
+            # Original centroid tracking / counting logic (line crossing + near-line)
             if len(current_centroids) == 0:
                 for obj_id in list(self.tracked_objects.keys()):
                     self.tracked_objects[obj_id]["disappeared"] += 1
@@ -215,8 +306,11 @@ class IMX500Camera:
                         for obj_id, data in self.tracked_objects.items():
                             prev_cx, prev_cy = data["centroid"]
                             dist = math.hypot(cx - prev_cx, cy - prev_cy)
-                            # Use larger threshold for objects that reappeared after detection gap
-                            max_d = MAX_DISTANCE_REAPPEAR if data["disappeared"] > 0 else MAX_DISTANCE
+                            max_d = (
+                                MAX_DISTANCE_REAPPEAR
+                                if data["disappeared"] > 0
+                                else MAX_DISTANCE
+                            )
                             if dist <= max_d:
                                 distances.append((dist, obj_id, i))
                     distances.sort(key=lambda item: item[0])
@@ -247,7 +341,6 @@ class IMX500Camera:
                     for i, (cx, cy, x, y, w, h) in enumerate(current_centroids):
                         if i not in used_centroids:
                             is_count_area = cx > split_x
-                            # Shrimp that appears in count area near the line likely crossed during detection gap
                             near_line = is_count_area and (cx - split_x) < NEAR_LINE_PX
                             self.tracked_objects[self.next_object_id] = {
                                 "centroid": (cx, cy),
@@ -263,7 +356,7 @@ class IMX500Camera:
 
             cv2.putText(
                 m.array, f"Live Count: {self.total_shrimp_count}",
-                (split_x + 20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255, 255), 2
+                (split_x + 20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, yellow, 2
             )
 
             if getattr(self.intrinsics, "preserve_aspect_ratio", False):
@@ -278,18 +371,36 @@ class IMX500Camera:
 
     def start(self):
         """Start camera and inference pipeline."""
+        # Recreate Picamera2 after close() released it (avoids libcamera "Configured state" error).
+        recreated = False
+        if self.picam2 is None or self._closed:
+            self.picam2 = Picamera2(self.imx500.camera_num)
+            self._closed = False
+            recreated = True
+            # If we had to re-acquire the camera, allow firmware upload again.
+            self._fw_uploaded = False
         ir = getattr(
             self.intrinsics,
             "inference_rate",
             getattr(self.intrinsics, "fps", 10),
         )
+        # Force BGR output so OpenCV/UI channel order is correct (avoids "blue skin" tint).
         config = self.picam2.create_preview_configuration(
-            controls={"FrameRate": ir}, buffer_count=12
+            main={"format": "BGR888"},
+            controls={"FrameRate": ir},
+            buffer_count=12,
         )
-        self.imx500.show_network_fw_progress_bar()
+        # Upload network firmware only when (re)acquiring the camera.
+        if recreated and not self._fw_uploaded:
+            self.imx500.show_network_fw_progress_bar()
+            self._fw_uploaded = True
         self.picam2.start(config, show_preview=False)
-        # ScalerCrop (x, y, w, h): use larger region to zoom out; (0, 200, 4056, 2640) shows more of scene
-        self.picam2.set_controls({"ScalerCrop": (0, 200, 4056, 2640)})
+        # ScalerCrop (zoom in) + manual exposure to reduce motion blur; AnalogueGain compensates for darkness
+        self.picam2.set_controls({
+            "ScalerCrop": SCALER_CROP,
+            "ExposureTime": EXPOSURE_TIME_US,
+            "AnalogueGain": ANALOGUE_GAIN,
+        })
         if getattr(self.intrinsics, "preserve_aspect_ratio", False):
             self.imx500.set_auto_aspect_ratio()
         self.picam2.pre_callback = lambda req, s="main": self._draw_detections(req, s)
@@ -311,25 +422,42 @@ class IMX500Camera:
             return None, self.total_shrimp_count
 
     def stop(self):
-        """Stop camera. Reuses same Picamera2 instance for next start()."""
-        if self.picam2:
+        """Stop camera for start/stop cycles within a session."""
+        if self.picam2 and not self._closed:
             try:
                 self.picam2.stop()
-                time.sleep(0.5)  # Allow libcamera to release camera fully
+                time.sleep(0.5)
             except Exception:
                 pass
+
+    def close(self):
+        """Fully release camera and IMX500 resources when leaving the biomass page."""
+        if self.picam2 and not self._closed:
+            try:
+                self.picam2.pre_callback = None
+                self.picam2.stop()
+            except Exception:
+                pass
+            self.picam2 = None
+            self._closed = True
+            time.sleep(1.5)  # Allow libcamera to fully release before re-acquire
+
+    def is_closed(self):
+        return self._closed
 
     def reset_count(self):
         """Reset tracking and shrimp count."""
         self.tracked_objects.clear()
         self.next_object_id = 0
         self.total_shrimp_count = 0
+        self.recent_counts.clear()
 
 
 class IMX500Worker(QThread):
     """Background worker that captures frames and emits them to the UI."""
 
     frame_ready = pyqtSignal(object, int)  # (frame: np.ndarray | None, count: int)
+    error = pyqtSignal(str)
 
     def __init__(self, camera: IMX500Camera | None, parent=None):
         super().__init__(parent)
@@ -342,8 +470,9 @@ class IMX500Worker(QThread):
             return
         try:
             self.camera.start()
-        except Exception:
+        except Exception as exc:
             self.frame_ready.emit(None, 0)
+            self.error.emit(f"Camera start failed: {exc}")
             return
 
         while not self._stop_requested:
@@ -354,8 +483,8 @@ class IMX500Worker(QThread):
 
         try:
             self.camera.stop()
-        except Exception:
-            pass
+        except Exception as exc:
+            self.error.emit(f"Camera stop failed: {exc}")
 
     def request_stop(self):
         self._stop_requested = True
