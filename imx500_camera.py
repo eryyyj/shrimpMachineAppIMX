@@ -13,11 +13,11 @@ from picamera2 import MappedArray, Picamera2
 from picamera2.devices import IMX500
 from picamera2.devices.imx500 import NetworkIntrinsics, postprocess_nanodet_detection
 
-# Tracking constants - tuned for fast-moving shrimp and detection gaps
-MAX_DISTANCE = 140          # Max pixel movement between frames to match same shrimp
-MAX_DISTANCE_REAPPEAR = 220 # Larger threshold when matching after detection gap
-MAX_DISAPPEARED = 100       # Frames before removing lost tracks
-NEAR_LINE_PX = 100          # New object in count area within this of line = likely crossed during gap
+# Tracking constants - tuned for post-larval scale (small, fast-moving in channel)
+MAX_DISTANCE = 100          # Max pixel movement between frames (80-120 for small objects)
+MAX_DISTANCE_REAPPEAR = 180 # Larger threshold when matching after detection gap (150-220)
+MAX_DISAPPEARED = 80        # Frames before removing lost tracks (60-100 for quicker cleanup)
+NEAR_LINE_PX = 65          # New object in count area within this of line = likely crossed during gap (50-80 at high zoom)
 
 # Area split (Detection Area on left, Count Area on right)
 DETECTION_AREA_RATIO = 0.50  # 50% detection area, 50% count area
@@ -329,8 +329,8 @@ class IMX500Camera:
                             and cx > split_x
                             and not self.tracked_objects[obj_id]["counted"]
                         ):
-                            self.total_shrimp_count += 1
-                            self.tracked_objects[obj_id]["counted"] = True
+                            if self._register_count(cx, cy):
+                                self.tracked_objects[obj_id]["counted"] = True
 
                     for obj_id in list(self.tracked_objects.keys()):
                         if obj_id not in used_ids:
@@ -348,8 +348,10 @@ class IMX500Camera:
                                 "disappeared": 0,
                             }
                             if near_line:
-                                self.total_shrimp_count += 1
-                                self.tracked_objects[self.next_object_id]["counted"] = True
+                                if self._register_count(cx, cy):
+                                    self.tracked_objects[self.next_object_id]["counted"] = True
+                                else:
+                                    self.tracked_objects[self.next_object_id]["counted"] = True
                             elif is_count_area:
                                 self.tracked_objects[self.next_object_id]["counted"] = True
                             self.next_object_id += 1
