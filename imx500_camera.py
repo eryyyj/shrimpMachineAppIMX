@@ -24,10 +24,6 @@ DEDUP_DISTANCE_PX = 80     # Base centroid distance to consider same shrimp acro
 DEDUP_TTL_SEC = 1.0        # Keep an object active this long for matching (seconds)
 DEDUP_SPEED_PX_PER_SEC = 250  # Extra allowed movement per second (for fast flow)
 
-# De-duplication of counts near the Count Area line
-RECENT_COUNT_TIME = 1.5     # Seconds within which repeated counts near same spot are treated as duplicates
-RECENT_COUNT_DISTANCE = 80  # Max pixel distance for a duplicate count relative to last crossing
-
 # Exposure / zoom crop: high shutter speed reduces motion blur
 EXPOSURE_TIME_US = 7500     # 7.5ms shutter (5000-10000 for 30fps)
 ANALOGUE_GAIN = 2.0         # Lower with extra light (e.g. 1.0–2.0); raise if too dark (e.g. 3.0–5.0)
@@ -121,10 +117,7 @@ class IMX500Camera:
         }
         self.last_detections = []
         self.last_results = None
-        self.tracked_objects = {}
-        self.next_object_id = 0
         self.total_shrimp_count = 0
-        self.recent_counts = []  # (timestamp, cx, cy) for recent line-cross events
         self._active_detections = []  # (cx, cy, last_seen_ts) for de-duplication
         self._fw_uploaded = False  # Ensure network firmware is uploaded only once per instance
 
@@ -212,36 +205,6 @@ class IMX500Camera:
         ]
         return self.last_detections
 
-    def _prune_recent_counts(self, now: float):
-        """Drop old recent-count entries outside the de-duplication window."""
-        cutoff = now - (RECENT_COUNT_TIME * 2.0)
-        self.recent_counts = [
-            (ts, cx, cy) for (ts, cx, cy) in self.recent_counts if ts >= cutoff
-        ]
-
-    def _is_duplicate_count(self, cx: int, cy: int, now: float) -> bool:
-        """Return True if a new count at (cx, cy) is likely the same shrimp."""
-        for ts, prev_cx, prev_cy in self.recent_counts:
-            if now - ts > RECENT_COUNT_TIME:
-                continue
-            if math.hypot(cx - prev_cx, cy - prev_cy) <= RECENT_COUNT_DISTANCE:
-                return True
-        return False
-
-    def _register_count(self, cx: int, cy: int):
-        """
-        Register a new shrimp count, with short-term spatial/temporal de-duplication.
-        Returns True if the global count was incremented, False if treated as duplicate.
-        """
-        now = time.time()
-        self._prune_recent_counts(now)
-        if self._is_duplicate_count(cx, cy, now):
-            return False
-
-        self.total_shrimp_count += 1
-        self.recent_counts.append((now, cx, cy))
-        return True
-
     def _draw_detections(self, request, stream="main"):
         """Pre-callback: draw detections and set live count."""
         detections = self.last_results
@@ -258,16 +221,12 @@ class IMX500Camera:
             yellow = (0, 255, 255, 255) if has_alpha else (0, 255, 255)
 
             now = time.time()
-
-            # Prune old active detections
             ttl_cutoff = now - DEDUP_TTL_SEC
-            self._active_detections = [
-                (ax, ay, ts) for (ax, ay, ts) in self._active_detections if ts >= ttl_cutoff
-            ]
 
-            # Draw detections + count only new (not matched) shrimp
             new_count = 0
             updated_active = []
+            used_active_indices = set()
+
             for det in detections:
                 x, y, w, h = det.box
                 cx, cy = int(x + w / 2), int(y + h / 2)
@@ -284,9 +243,13 @@ class IMX500Camera:
                 matched_idx = None
                 best_dist = None
                 for idx, (ax, ay, ts) in enumerate(self._active_detections):
+                    if idx in used_active_indices:
+                        continue  # Don't match the same old track to multiple new detections
+                        
                     dt = max(0.0, now - ts)
                     allowed = DEDUP_DISTANCE_PX + (DEDUP_SPEED_PX_PER_SEC * dt)
                     dist = math.hypot(cx - ax, cy - ay)
+                    
                     if dist <= allowed and (best_dist is None or dist < best_dist):
                         matched_idx = idx
                         best_dist = dist
@@ -297,15 +260,17 @@ class IMX500Camera:
                     updated_active.append((cx, cy, now))
                 else:
                     # Existing shrimp: refresh last-seen position/time
-                    ax, ay, _ = self._active_detections[matched_idx]
+                    used_active_indices.add(matched_idx)
                     updated_active.append((cx, cy, now))
-                    # Remove matched to prevent multiple detections matching the same active entry
-                    self._active_detections[matched_idx] = (ax, ay, -1.0)
 
-            # Drop any “consumed” active entries and merge with updated
-            self._active_detections = [
-                (ax, ay, ts) for (ax, ay, ts) in self._active_detections if ts >= ttl_cutoff
-            ] + updated_active
+            # Keep any active detections that weren't seen in this frame but are still within TTL
+            unmatched_active = [
+                (ax, ay, ts) for idx, (ax, ay, ts) in enumerate(self._active_detections)
+                if idx not in used_active_indices and ts >= ttl_cutoff
+            ]
+
+            # Merge old remaining tracks with updated tracks
+            self._active_detections = unmatched_active + updated_active
 
             # Running total (unique)
             self.total_shrimp_count += new_count
@@ -408,7 +373,6 @@ class IMX500Camera:
     def reset_count(self):
         """Reset shrimp count."""
         self.total_shrimp_count = 0
-        self.recent_counts.clear()
         self._active_detections.clear()
 
 
@@ -424,26 +388,4 @@ class IMX500Worker(QThread):
         self._stop_requested = False
 
     def run(self):
-        if self.camera is None:
-            self.frame_ready.emit(None, 0)
-            return
-        try:
-            self.camera.start()
-        except Exception as exc:
-            self.frame_ready.emit(None, 0)
-            self.error.emit(f"Camera start failed: {exc}")
-            return
-
-        while not self._stop_requested:
-            frame, count = self.camera.capture_frame_and_count()
-            self.frame_ready.emit(frame, count)
-            if frame is None:
-                time.sleep(0.1)
-
-        try:
-            self.camera.stop()
-        except Exception as exc:
-            self.error.emit(f"Camera stop failed: {exc}")
-
-    def request_stop(self):
-        self._stop_requested = True
+        if self.camera is
