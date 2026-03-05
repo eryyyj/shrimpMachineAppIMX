@@ -13,26 +13,28 @@ from picamera2 import MappedArray, Picamera2
 from picamera2.devices import IMX500
 from picamera2.devices.imx500 import NetworkIntrinsics, postprocess_nanodet_detection
 
-# Counting mode
-# Instant unique counting (no areas/line):
-# - We still draw all detections each frame.
-# - The displayed Count is a running total of unique shrimp detections.
-# - De-duplication is done by matching detection centroids against recently-seen centroids.
+# Tracking constants - tuned for post-larval scale (small, fast-moving in channel)
+MAX_DISTANCE = 100          # Max pixel movement between frames (80-120 for small objects)
+MAX_DISTANCE_REAPPEAR = 180 # Larger threshold when matching after detection gap (150-220)
+MAX_DISAPPEARED = 80        # Frames before removing lost tracks (60-100 for quicker cleanup)
+NEAR_LINE_PX = 65          # New object in count area within this of line = likely crossed during gap (50-80 at high zoom)
 
-# De-dup tuning (post-larval scale)
-DEDUP_DISTANCE_PX = 80     # Base centroid distance to consider same shrimp across frames
-DEDUP_TTL_SEC = 1.0        # Keep an object active this long for matching (seconds)
-DEDUP_SPEED_PX_PER_SEC = 250  # Extra allowed movement per second (for fast flow)
+# Area split (Detection Area on left, Count Area on right)
+DETECTION_AREA_RATIO = 0.50  # 50% detection area, 50% count area
+
+# De-duplication of counts near the Count Area line
+RECENT_COUNT_TIME = 1.5     # Seconds within which repeated counts near same spot are treated as duplicates
+RECENT_COUNT_DISTANCE = 80  # Max pixel distance for a duplicate count relative to last crossing
 
 # Exposure / zoom crop: high shutter speed reduces motion blur
 EXPOSURE_TIME_US = 7500     # 7.5ms shutter (5000-10000 for 30fps)
-ANALOGUE_GAIN = 2.0         # Lower with extra light (e.g. 1.0–2.0); raise if too dark (e.g. 3.0–5.0)
+ANALOGUE_GAIN = 2.0         # Lower with extra light (e.g. 1.0â€“2.0); raise if too dark (e.g. 3.0â€“5.0)
 # Zoom-in crop to remove unused top/bottom areas (x, y, width, height)
 SCALER_CROP = (0, 400, 4056, 2200)
 
 # Default config (custom shrimp detection model)
-DEFAULT_MODEL = "/home/hiponpd/my_custom_model/network.rpk"
-DEFAULT_LABELS = "/home/hiponpd/Downloads/best_imx_model/labels.txt"
+DEFAULT_MODEL = "/home/hiponpd/Documents/ShrimpAppIMX/shrimpMachineAppIMX/models/network.rpk"
+DEFAULT_LABELS = "/home/hiponpd/Documents/ShrimpAppIMX/shrimpMachineAppIMX/label/labels.txt"
 DEFAULT_FPS = 30
 DEFAULT_THRESHOLD = 0.10
 DEFAULT_IOU = 0.65
@@ -117,8 +119,10 @@ class IMX500Camera:
         }
         self.last_detections = []
         self.last_results = None
+        self.tracked_objects = {}
+        self.next_object_id = 0
         self.total_shrimp_count = 0
-        self._active_detections = []  # (cx, cy, last_seen_ts) for de-duplication
+        self.recent_counts = []  # (timestamp, cx, cy) for recent line-cross events
         self._fw_uploaded = False  # Ensure network firmware is uploaded only once per instance
 
         # IMX500 must be created before Picamera2
@@ -205,31 +209,69 @@ class IMX500Camera:
         ]
         return self.last_detections
 
+    def _prune_recent_counts(self, now: float):
+        """Drop old recent-count entries outside the de-duplication window."""
+        cutoff = now - (RECENT_COUNT_TIME * 2.0)
+        self.recent_counts = [
+            (ts, cx, cy) for (ts, cx, cy) in self.recent_counts if ts >= cutoff
+        ]
+
+    def _is_duplicate_count(self, cx: int, cy: int, now: float) -> bool:
+        """Return True if a new count at (cx, cy) is likely the same shrimp."""
+        for ts, prev_cx, prev_cy in self.recent_counts:
+            if now - ts > RECENT_COUNT_TIME:
+                continue
+            if math.hypot(cx - prev_cx, cy - prev_cy) <= RECENT_COUNT_DISTANCE:
+                return True
+        return False
+
+    def _register_count(self, cx: int, cy: int):
+        """
+        Register a new shrimp count, with short-term spatial/temporal de-duplication.
+        Returns True if the global count was incremented, False if treated as duplicate.
+        """
+        now = time.time()
+        self._prune_recent_counts(now)
+        if self._is_duplicate_count(cx, cy, now):
+            return False
+
+        self.total_shrimp_count += 1
+        self.recent_counts.append((now, cx, cy))
+        return True
+
     def _draw_detections(self, request, stream="main"):
-        """Pre-callback: draw detections and set live count."""
+        """Pre-callback: draw detections and run centroid tracking."""
         detections = self.last_results
         if detections is None:
             return
 
         with MappedArray(request, stream) as m:
             height, width = m.array.shape[:2]
+            # 30% Detection Area (left), 70% Count Area (right)
+            split_x = int(width * DETECTION_AREA_RATIO)
 
             has_alpha = (m.array.ndim == 3 and m.array.shape[2] == 4)
+            blue = (255, 0, 0, 255) if has_alpha else (255, 0, 0)
             white = (255, 255, 255, 255) if has_alpha else (255, 255, 255)
             green = (0, 255, 0, 255) if has_alpha else (0, 255, 0)
             red = (0, 0, 255, 255) if has_alpha else (0, 0, 255)
             yellow = (0, 255, 255, 255) if has_alpha else (0, 255, 255)
 
-            now = time.time()
-            ttl_cutoff = now - DEDUP_TTL_SEC
+            cv2.line(m.array, (split_x, 0), (split_x, height), blue, 2)
+            cv2.putText(
+                m.array, "Detection Area", (20, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, white, 1
+            )
+            cv2.putText(
+                m.array, "Count Area", (split_x + 20, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, white, 1
+            )
 
-            new_count = 0
-            updated_active = []
-            used_active_indices = set()
-
+            current_centroids = []
             for det in detections:
                 x, y, w, h = det.box
                 cx, cy = int(x + w / 2), int(y + h / 2)
+                current_centroids.append((cx, cy, x, y, w, h))
                 cv2.rectangle(
                     m.array,
                     (int(x), int(y)),
@@ -239,49 +281,84 @@ class IMX500Camera:
                 )
                 cv2.circle(m.array, (cx, cy), 3, red, -1)
 
-                # Match this detection to an existing active detection (same shrimp)
-                matched_idx = None
-                best_dist = None
-                for idx, (ax, ay, ts) in enumerate(self._active_detections):
-                    if idx in used_active_indices:
-                        continue  # Don't match the same old track to multiple new detections
-                        
-                    dt = max(0.0, now - ts)
-                    allowed = DEDUP_DISTANCE_PX + (DEDUP_SPEED_PX_PER_SEC * dt)
-                    dist = math.hypot(cx - ax, cy - ay)
-                    
-                    if dist <= allowed and (best_dist is None or dist < best_dist):
-                        matched_idx = idx
-                        best_dist = dist
-
-                if matched_idx is None:
-                    # New shrimp
-                    new_count += 1
-                    updated_active.append((cx, cy, now))
+            # Original centroid tracking / counting logic (line crossing + near-line)
+            if len(current_centroids) == 0:
+                for obj_id in list(self.tracked_objects.keys()):
+                    self.tracked_objects[obj_id]["disappeared"] += 1
+                    if self.tracked_objects[obj_id]["disappeared"] > MAX_DISAPPEARED:
+                        del self.tracked_objects[obj_id]
+            else:
+                if len(self.tracked_objects) == 0:
+                    for cx, cy, x, y, w, h in current_centroids:
+                        self.tracked_objects[self.next_object_id] = {
+                            "centroid": (cx, cy),
+                            "counted": False,
+                            "disappeared": 0,
+                        }
+                        if cx > split_x:
+                            self.tracked_objects[self.next_object_id]["counted"] = True
+                        self.next_object_id += 1
                 else:
-                    # Existing shrimp: refresh last-seen position/time
-                    used_active_indices.add(matched_idx)
-                    updated_active.append((cx, cy, now))
+                    used_centroids = set()
+                    used_ids = set()
+                    distances = []
+                    for i, (cx, cy, x, y, w, h) in enumerate(current_centroids):
+                        for obj_id, data in self.tracked_objects.items():
+                            prev_cx, prev_cy = data["centroid"]
+                            dist = math.hypot(cx - prev_cx, cy - prev_cy)
+                            max_d = (
+                                MAX_DISTANCE_REAPPEAR
+                                if data["disappeared"] > 0
+                                else MAX_DISTANCE
+                            )
+                            if dist <= max_d:
+                                distances.append((dist, obj_id, i))
+                    distances.sort(key=lambda item: item[0])
 
-            # Keep any active detections that weren't seen in this frame but are still within TTL
-            unmatched_active = [
-                (ax, ay, ts) for idx, (ax, ay, ts) in enumerate(self._active_detections)
-                if idx not in used_active_indices and ts >= ttl_cutoff
-            ]
+                    for dist, obj_id, i in distances:
+                        if obj_id in used_ids or i in used_centroids:
+                            continue
+                        used_ids.add(obj_id)
+                        used_centroids.add(i)
+                        cx, cy = current_centroids[i][0], current_centroids[i][1]
+                        prev_cx = self.tracked_objects[obj_id]["centroid"][0]
+                        self.tracked_objects[obj_id]["centroid"] = (cx, cy)
+                        self.tracked_objects[obj_id]["disappeared"] = 0
+                        if (
+                            prev_cx <= split_x
+                            and cx > split_x
+                            and not self.tracked_objects[obj_id]["counted"]
+                        ):
+                            if self._register_count(cx, cy):
+                                self.tracked_objects[obj_id]["counted"] = True
 
-            # Merge old remaining tracks with updated tracks
-            self._active_detections = unmatched_active + updated_active
+                    for obj_id in list(self.tracked_objects.keys()):
+                        if obj_id not in used_ids:
+                            self.tracked_objects[obj_id]["disappeared"] += 1
+                            if self.tracked_objects[obj_id]["disappeared"] > MAX_DISAPPEARED:
+                                del self.tracked_objects[obj_id]
 
-            # Running total (unique)
-            self.total_shrimp_count += new_count
+                    for i, (cx, cy, x, y, w, h) in enumerate(current_centroids):
+                        if i not in used_centroids:
+                            is_count_area = cx > split_x
+                            near_line = is_count_area and (cx - split_x) < NEAR_LINE_PX
+                            self.tracked_objects[self.next_object_id] = {
+                                "centroid": (cx, cy),
+                                "counted": is_count_area,
+                                "disappeared": 0,
+                            }
+                            if near_line:
+                                if self._register_count(cx, cy):
+                                    self.tracked_objects[self.next_object_id]["counted"] = True
+                                else:
+                                    self.tracked_objects[self.next_object_id]["counted"] = True
+                            elif is_count_area:
+                                self.tracked_objects[self.next_object_id]["counted"] = True
+                            self.next_object_id += 1
 
             cv2.putText(
                 m.array, f"Live Count: {self.total_shrimp_count}",
-                (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, yellow, 2
-            )
-            cv2.putText(
-                m.array, f"Detections: {len(detections)}",
-                (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, white, 1
+                (split_x + 20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, yellow, 2
             )
 
             if getattr(self.intrinsics, "preserve_aspect_ratio", False):
@@ -371,9 +448,11 @@ class IMX500Camera:
         return self._closed
 
     def reset_count(self):
-        """Reset shrimp count."""
+        """Reset tracking and shrimp count."""
+        self.tracked_objects.clear()
+        self.next_object_id = 0
         self.total_shrimp_count = 0
-        self._active_detections.clear()
+        self.recent_counts.clear()
 
 
 class IMX500Worker(QThread):
