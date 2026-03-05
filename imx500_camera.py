@@ -20,8 +20,9 @@ from picamera2.devices.imx500 import NetworkIntrinsics, postprocess_nanodet_dete
 # - De-duplication is done by matching detection centroids against recently-seen centroids.
 
 # De-dup tuning (post-larval scale)
-DEDUP_DISTANCE_PX = 60   # Max centroid distance to consider same shrimp across frames
-DEDUP_TTL_SEC = 0.6      # How long to keep a detection “active” for matching (seconds)
+DEDUP_DISTANCE_PX = 80     # Base centroid distance to consider same shrimp across frames
+DEDUP_TTL_SEC = 1.0        # Keep an object active this long for matching (seconds)
+DEDUP_SPEED_PX_PER_SEC = 250  # Extra allowed movement per second (for fast flow)
 
 # De-duplication of counts near the Count Area line
 RECENT_COUNT_TIME = 1.5     # Seconds within which repeated counts near same spot are treated as duplicates
@@ -283,8 +284,10 @@ class IMX500Camera:
                 matched_idx = None
                 best_dist = None
                 for idx, (ax, ay, ts) in enumerate(self._active_detections):
+                    dt = max(0.0, now - ts)
+                    allowed = DEDUP_DISTANCE_PX + (DEDUP_SPEED_PX_PER_SEC * dt)
                     dist = math.hypot(cx - ax, cy - ay)
-                    if dist <= DEDUP_DISTANCE_PX and (best_dist is None or dist < best_dist):
+                    if dist <= allowed and (best_dist is None or dist < best_dist):
                         matched_idx = idx
                         best_dist = dist
 
