@@ -20,7 +20,8 @@ MAX_DISAPPEARED = 80        # Frames before removing lost tracks (60-100 for qui
 NEAR_LINE_PX = 65          # New object in count area within this of line = likely crossed during gap (50-80 at high zoom)
 
 # Area split (Detection Area on left, Count Area on right)
-DETECTION_AREA_RATIO = 0.50  # 50% detection area, 50% count area
+# 70% Detection Area (left), 30% Count Area (right)
+DETECTION_AREA_RATIO = 0.70
 
 # De-duplication of counts near the Count Area line
 RECENT_COUNT_TIME = 1.5     # Seconds within which repeated counts near same spot are treated as duplicates
@@ -289,13 +290,17 @@ class IMX500Camera:
                         del self.tracked_objects[obj_id]
             else:
                 if len(self.tracked_objects) == 0:
+                    # First frame with detections: treat any object in the Count Area as a new shrimp.
                     for cx, cy, x, y, w, h in current_centroids:
+                        is_count_area = cx > split_x
                         self.tracked_objects[self.next_object_id] = {
                             "centroid": (cx, cy),
                             "counted": False,
                             "disappeared": 0,
                         }
-                        if cx > split_x:
+                        if is_count_area:
+                            # Count instantly when a new shrimp first appears in the 30% Count Area.
+                            self._register_count(cx, cy)
                             self.tracked_objects[self.next_object_id]["counted"] = True
                         self.next_object_id += 1
                 else:
@@ -341,18 +346,14 @@ class IMX500Camera:
                     for i, (cx, cy, x, y, w, h) in enumerate(current_centroids):
                         if i not in used_centroids:
                             is_count_area = cx > split_x
-                            near_line = is_count_area and (cx - split_x) < NEAR_LINE_PX
                             self.tracked_objects[self.next_object_id] = {
                                 "centroid": (cx, cy),
                                 "counted": is_count_area,
                                 "disappeared": 0,
                             }
-                            if near_line:
-                                if self._register_count(cx, cy):
-                                    self.tracked_objects[self.next_object_id]["counted"] = True
-                                else:
-                                    self.tracked_objects[self.next_object_id]["counted"] = True
-                            elif is_count_area:
+                            if is_count_area:
+                                # Any new track whose centroid is in the 30% Count Area increments once.
+                                self._register_count(cx, cy)
                                 self.tracked_objects[self.next_object_id]["counted"] = True
                             self.next_object_id += 1
 
