@@ -388,4 +388,26 @@ class IMX500Worker(QThread):
         self._stop_requested = False
 
     def run(self):
-        if self.camera is
+        if self.camera is None:
+            self.frame_ready.emit(None, 0)
+            return
+        try:
+            self.camera.start()
+        except Exception as exc:
+            self.frame_ready.emit(None, 0)
+            self.error.emit(f"Camera start failed: {exc}")
+            return
+
+        while not self._stop_requested:
+            frame, count = self.camera.capture_frame_and_count()
+            self.frame_ready.emit(frame, count)
+            if frame is None:
+                time.sleep(0.1)
+
+        try:
+            self.camera.stop()
+        except Exception as exc:
+            self.error.emit(f"Camera stop failed: {exc}")
+
+    def request_stop(self):
+        self._stop_requested = True
